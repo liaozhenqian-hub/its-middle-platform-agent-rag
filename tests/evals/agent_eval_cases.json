@@ -1,0 +1,96 @@
+[
+  {
+    "id": "metric-definition",
+    "category": "metric_definition",
+    "query": "销售额指标的业务口径是什么？",
+    "expected_tools": ["metric_platform_expert", "search_metric_platform_knowledge"]
+  },
+  {
+    "id": "metric-live-data",
+    "category": "metric_live_data",
+    "query": "查询昨天的销售额实际值",
+    "expected_tools": ["metric_platform_expert", "metricMcpInfo", "searchBizMetric", "searchMetricApp", "searchMetricAppQueryResult"]
+  },
+  {
+    "id": "metric-sql",
+    "category": "metric_sql",
+    "query": "查找销售额指标对应的 SQL",
+    "expected_tools": ["metric_platform_expert", "searchSqlByMetricTypeAndNameExact"]
+  },
+  {
+    "id": "approval-flow",
+    "category": "approval_flow",
+    "query": "审批节点转交后原审批人还能处理吗？",
+    "expected_tools": ["approval_flow_expert", "search_domain_code", "search_domain_documents"]
+  },
+  {
+    "id": "workflow",
+    "category": "workflow",
+    "query": "工作流实例和流程定义有什么区别？",
+    "expected_tools": ["workflow_expert", "search_domain_code", "search_domain_documents"]
+  },
+  {
+    "id": "cross-domain",
+    "category": "cross_domain",
+    "query": "指标异常后如何发起审批并进入工作流？",
+    "expected_tools": ["metric_platform_expert", "approval_flow_expert", "workflow_expert"]
+  },
+  {
+    "id": "ambiguous-app",
+    "category": "clarification",
+    "query": "查询销售额数据",
+    "expected_behavior": "多个指标应用候选时要求用户确认，不调用 searchMetricAppQueryResult"
+  },
+  {
+    "id": "no-evidence",
+    "category": "refusal",
+    "query": "公司明年会新增什么审批规则？",
+    "expected_behavior": "无证据时明确无法确认，不编造"
+  },
+  {
+    "id": "greeting",
+    "category": "direct_answer",
+    "query": "你好",
+    "expected_behavior": "Manager 可直接回答，无需调用专家"
+  },
+  {
+    "id": "bug-develop-trace",
+    "category": "bug_diagnosis",
+    "query": "开发环境接口报空指针，trace ID 是 trace-dev-123456，帮我定位",
+    "expected_tools": ["bug_diagnosis_expert", "query_middle_trace_logs", "search_bug_code"],
+    "expected_code_branch": "develop"
+  },
+  {
+    "id": "bug-test-trace",
+    "category": "bug_diagnosis",
+    "query": "测试环境请求失败，trace ID 是 trace-test-123456",
+    "expected_tools": ["bug_diagnosis_expert", "query_middle_trace_logs", "search_bug_code"],
+    "expected_code_branch": "develop"
+  },
+  {
+    "id": "bug-prod-trace",
+    "category": "bug_diagnosis",
+    "query": "线上接口异常，trace ID 是 trace-prod-123456",
+    "expected_tools": ["bug_diagnosis_expert", "query_middle_trace_logs", "search_bug_code"],
+    "expected_code_branch": "master"
+  },
+  {
+    "id": "bug-missing-environment",
+    "category": "clarification",
+    "query": "接口报错了，trace ID 是 trace-unknown-123456",
+    "expected_behavior": "先确认开发、测试或生产环境，不猜测日志环境"
+  },
+  {
+    "id": "bug-no-logs",
+    "category": "refusal",
+    "query": "测试环境 trace ID trace-empty-123456 没查到日志，直接告诉我根因",
+    "expected_behavior": "没有日志或代码 citation 时触发证据门禁，不编造根因"
+  },
+  {
+    "id": "bug-evidence-backed",
+    "category": "bug_diagnosis",
+    "query": "测试环境 trace ID trace-backed-123456，请结合日志和代码给出修复方案",
+    "expected_citation_types": ["log_trace", "code"],
+    "expected_behavior": "区分确认事实、可能原因和未知项，并给出验证步骤"
+  }
+]

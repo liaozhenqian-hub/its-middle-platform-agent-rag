@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-07-23
+goal: Add optional Feishu identity, anonymous device cookies, memory merging,
+  and personal Codex tokens

@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "its-middle-platform-agent-rag"
+version = "0.1.0"
+description = "RAG knowledge ingestion and Chroma vector store for Loctek middle platform agent."
+requires-python = ">=3.11.9"
+dependencies = [
+  "chromadb>=0.5.23",
+  "langchain-chroma>=0.1.4",
+  "langchain-core>=0.3.0",
+  "langchain-openai>=0.2.0",
+  "langgraph==1.2.9",
+  "langgraph-checkpoint-sqlite==3.1.0",
+  "lark-oapi==1.7.1",
+  "openai>=2.45,<3",
+  "openai-agents==0.18.2",
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.34,<1",
+  "aiosqlite>=0.21,<1",
+  "httpx>=0.27,<1",
+  "python-multipart>=0.0.9,<1",
+  "PyYAML>=6,<7",
+  "cryptography>=45,<50",
+  "pwdlib[argon2]>=0.3,<1",
+  "python-docx>=1.1,<2",
+  "pypdf>=5,<7",
+  "tree-sitter>=0.25,<0.26",
+  "tree-sitter-java>=0.23,<0.24",
+  "tree-sitter-javascript>=0.23,<0.26",
+  "tree-sitter-typescript>=0.23,<0.24",
+  "jieba>=0.42.1",
+  "pydantic>=2.12.2,<3",
+  "pydantic-settings>=2.4.0",
+  "python-dotenv>=1.0.1",
+  "typer>=0.12.5",
+  "rich>=13.7.1",
+  "rank-bm25>=0.2.2"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2.0",
+  "pytest-asyncio>=1.0.0"
+]
+
+[project.scripts]
+knowledge-rag = "knowledge.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["knowledge*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+  "live: calls explicitly configured live model and MCP services"
+]

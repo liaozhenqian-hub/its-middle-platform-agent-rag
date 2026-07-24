@@ -1,0 +1,56 @@
+from pathlib import Path
+
+import pytest
+
+from knowledge.agent_runtime.conversation_scopes import (
+    ConversationScopeConflictError,
+    ConversationScopeRepository,
+)
+
+
+@pytest.mark.asyncio
+async def test_conversation_scope_is_persistent_and_idempotent(tmp_path: Path):
+    db_path = tmp_path / "agent.db"
+    first_repository = ConversationScopeRepository(db_path)
+    await first_repository.initialize()
+
+    created = await first_repository.bind(
+        "conversation-1",
+        "middle-platform",
+        "metric-platform",
+    )
+    repeated = await first_repository.bind(
+        "conversation-1",
+        "middle-platform",
+        "metric-platform",
+    )
+    restarted_repository = ConversationScopeRepository(db_path)
+    await restarted_repository.initialize()
+
+    assert repeated == created
+    assert await restarted_repository.get("conversation-1") == created
+
+
+@pytest.mark.asyncio
+async def test_conversation_scope_rejects_switch_and_can_be_deleted(tmp_path: Path):
+    repository = ConversationScopeRepository(tmp_path / "agent.db")
+    await repository.initialize()
+    await repository.bind("conversation-1", "middle-platform", "metric-platform")
+
+    with pytest.raises(ConversationScopeConflictError):
+        await repository.bind("conversation-1", "middle-platform", "workflow")
+
+    assert await repository.delete("conversation-1") is True
+    assert await repository.get("conversation-1") is None
+    assert await repository.delete("conversation-1") is False
+
+
+@pytest.mark.asyncio
+async def test_conversation_scope_validates_identifiers(tmp_path: Path):
+    repository = ConversationScopeRepository(tmp_path / "agent.db")
+    await repository.initialize()
+
+    with pytest.raises(ValueError):
+        await repository.bind("", "middle-platform", None)
+    with pytest.raises(ValueError):
+        await repository.bind("conversation-1", "", None)
