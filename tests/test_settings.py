@@ -41,6 +41,22 @@ def test_settings_support_deepseek_and_embedding_fields():
     assert settings.deepseek_reasoning_enabled is True
 
 
+def test_settings_exposes_manager_reasoning_defaults():
+    settings = Settings(_env_file=None)
+
+    assert settings.agent_manager_reasoning_enabled is True
+    assert settings.agent_manager_reasoning_timeout_seconds == 60.0
+
+
+@pytest.mark.parametrize("timeout", [0, -1, 181])
+def test_settings_rejects_invalid_manager_reasoning_timeout(timeout: float):
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            AGENT_MANAGER_REASONING_TIMEOUT_SECONDS=timeout,
+        )
+
+
 def test_legacy_openai_embedding_fields_still_work():
     settings = Settings(
         _env_file=None,

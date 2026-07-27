@@ -104,6 +104,16 @@ class Settings(BaseSettings):
         alias="AGENT_OPENAI_BASE_URL",
     )
     agent_max_turns: int = Field(default=12, ge=1, alias="AGENT_MAX_TURNS")
+    agent_manager_reasoning_enabled: bool = Field(
+        default=True,
+        alias="AGENT_MANAGER_REASONING_ENABLED",
+    )
+    agent_manager_reasoning_timeout_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        le=180,
+        alias="AGENT_MANAGER_REASONING_TIMEOUT_SECONDS",
+    )
     agent_intent_router_enabled: bool = Field(
         default=True,
         alias="AGENT_INTENT_ROUTER_ENABLED",
