@@ -38,6 +38,7 @@ from knowledge.agent_runtime.pending_runs import (
     PendingRunNotFoundError,
     PendingRunRepository,
 )
+from knowledge.agent_runtime.reasoning_synthesis import ManagerReasoningSynthesizer
 from knowledge.agent_runtime.pipeline_registry import RetrievalPipelineRegistry
 from knowledge.agent_runtime.intent_router import DomainIntentRouter
 from knowledge.agent_runtime.hybrid_intent_router import HybridDomainIntentRouter
@@ -153,6 +154,23 @@ from knowledge.swagger.inspector import SwaggerInspector
 
 
 logger = logging.getLogger(__name__)
+
+
+def _build_manager_reasoning_synthesizer(
+    settings: Settings,
+    model_factory: AgentModelFactory,
+) -> ManagerReasoningSynthesizer | None:
+    if not (
+        settings.agent_model_provider == "deepseek"
+        and settings.deepseek_reasoning_enabled
+        and settings.agent_manager_reasoning_enabled
+    ):
+        return None
+    return ManagerReasoningSynthesizer(
+        model=model_factory.create_reasoning_model(),
+        run_config_factory=model_factory.create_run_config,
+        timeout_seconds=settings.agent_manager_reasoning_timeout_seconds,
+    )
 
 def _sse(event: dict[str, Any]) -> str:
     return (
@@ -406,6 +424,17 @@ def create_app(
 
         model_factory = AgentModelFactory(settings)
         model = model_factory.create_model()
+        try:
+            manager_reasoning_synthesizer = _build_manager_reasoning_synthesizer(
+                settings,
+                model_factory,
+            )
+        except Exception:
+            logger.warning(
+                "Manager reasoning synthesizer unavailable during startup",
+                exc_info=True,
+            )
+            manager_reasoning_synthesizer = None
         registry = RetrievalPipelineRegistry(settings=settings)
         await asyncio.to_thread(
             registry.warm,
@@ -550,6 +579,7 @@ def create_app(
             public_citation_limit=settings.agent_public_citation_limit,
             bug_graph_service=bug_graph_service,
             memory_service=memory_service,
+            reasoning_synthesizer=manager_reasoning_synthesizer,
         )
         semantic_judge = None
         if (

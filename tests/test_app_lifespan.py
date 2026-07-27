@@ -8,6 +8,72 @@ import knowledge.api.app as app_module
 from knowledge.config.settings import Settings
 
 
+def test_manager_reasoning_synthesizer_is_only_built_for_enabled_deepseek():
+    class FakeModelFactory:
+        def __init__(self):
+            self.calls = 0
+
+        def create_reasoning_model(self):
+            self.calls += 1
+            return "pro-model"
+
+        def create_run_config(self, *_args, **_kwargs):
+            return None
+
+    model_factory = FakeModelFactory()
+    settings = Settings(
+        _env_file=None,
+        AGENT_MODEL_PROVIDER="deepseek",
+        DEEPSEEK_API_KEY="test-key",
+        DEEPSEEK_REASONING_ENABLED=True,
+        AGENT_MANAGER_REASONING_ENABLED=True,
+    )
+
+    synthesizer = app_module._build_manager_reasoning_synthesizer(
+        settings,
+        model_factory,
+    )
+
+    assert synthesizer is not None
+    assert synthesizer.agent.model == "pro-model"
+    assert model_factory.calls == 1
+
+
+@pytest.mark.parametrize(
+    ("provider", "manager_enabled", "reasoning_enabled"),
+    [
+        ("openai", True, True),
+        ("deepseek", False, True),
+        ("deepseek", True, False),
+    ],
+)
+def test_manager_reasoning_synthesizer_stays_disabled_when_gate_is_closed(
+    provider,
+    manager_enabled,
+    reasoning_enabled,
+):
+    class FakeModelFactory:
+        def create_reasoning_model(self):
+            raise AssertionError("reasoning model must not be created")
+
+    settings = Settings(
+        _env_file=None,
+        AGENT_MODEL_PROVIDER=provider,
+        AGENT_OPENAI_API_KEY="test-key",
+        DEEPSEEK_API_KEY="test-key",
+        AGENT_MANAGER_REASONING_ENABLED=manager_enabled,
+        DEEPSEEK_REASONING_ENABLED=reasoning_enabled,
+    )
+
+    assert (
+        app_module._build_manager_reasoning_synthesizer(
+            settings,
+            FakeModelFactory(),
+        )
+        is None
+    )
+
+
 def test_production_lifespan_wires_catalog_scopes_and_swagger_provider(
     monkeypatch, tmp_path
 ):

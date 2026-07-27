@@ -22,6 +22,7 @@ from knowledge.agent_runtime.evidence_policy import EvidencePolicy
 from knowledge.agent_runtime.pending_runs import PendingRunRepository
 from knowledge.agent_runtime.public_answer import PublicAnswerStream, sanitize_public_answer
 from knowledge.agent_runtime.request_guard import RequestGuard
+from knowledge.agent_runtime.reasoning_synthesis import ReasoningSynthesisRequest
 from knowledge.agent_runtime.sessions import AgentSessionFactory
 from knowledge.bug_graph.tool import run_bug_graph
 
@@ -94,6 +95,7 @@ class AgentService:
         request_guard: RequestGuard | None = None,
         bug_graph_service: Any | None = None,
         memory_service: Any | None = None,
+        reasoning_synthesizer: Any | None = None,
     ):
         self.manager = manager
         self.domain_managers = domain_managers or {}
@@ -104,6 +106,7 @@ class AgentService:
         self.request_guard = request_guard or RequestGuard()
         self.bug_graph_service = bug_graph_service
         self.memory_service = memory_service
+        self.reasoning_synthesizer = reasoning_synthesizer
         self.model_factory = model_factory
         self.session_factory = session_factory
         self.pending_runs = pending_runs
@@ -715,12 +718,15 @@ class AgentService:
             and not self._has_evidence(context)
         ):
             answer = EVIDENCE_UNAVAILABLE_ANSWER
-        elif (
-            self._specialist_invoked(context)
-            and not self._bug_graph_invoked(context)
-            and context.response_mode != "clarification"
-        ):
-            answer = self.evidence_policy.safeguard(answer, context.citations)
+        else:
+            if self._should_synthesize(context):
+                answer = await self._synthesize_answer(answer, citations, context)
+            if (
+                self._specialist_invoked(context)
+                and not self._bug_graph_invoked(context)
+                and context.response_mode != "clarification"
+            ):
+                answer = self.evidence_policy.safeguard(answer, context.citations)
         answer = sanitize_public_answer(answer, citations)
         return AgentRunResponse(
             status="completed",
@@ -947,3 +953,53 @@ class AgentService:
             if int(citation.metadata.get("log_count") or 0) > 0:
                 return True
         return False
+
+    def _should_synthesize(self, context: AgentRunContext) -> bool:
+        return bool(
+            self.reasoning_synthesizer is not None
+            and context.response_mode == "answer"
+            and context.response_override is None
+            and not self._bug_graph_invoked(context)
+            and self._has_evidence(context)
+            and (
+                len(set(context.routing_domains)) > 1
+                or len(self._specialists_used(context)) > 1
+            )
+        )
+
+    async def _synthesize_answer(
+        self,
+        draft: str,
+        citations: list[Citation],
+        context: AgentRunContext,
+    ) -> str:
+        started = asyncio.get_running_loop().time()
+        status = "completed"
+        try:
+            return await self.reasoning_synthesizer.synthesize(
+                ReasoningSynthesisRequest(
+                    question=context.current_user_message,
+                    draft=draft,
+                    domains=tuple(context.routing_domains),
+                    citations=tuple(citations),
+                    conversation_id=context.conversation_id,
+                )
+            )
+        except TimeoutError:
+            status = "timeout"
+            return draft
+        except Exception:
+            status = "failed"
+            return draft
+        finally:
+            context.runtime_spans.append(
+                RuntimeSpan(
+                    kind="llm",
+                    name="manager.reasoning_synthesis",
+                    status=status,
+                    duration_ms=(
+                        asyncio.get_running_loop().time() - started
+                    )
+                    * 1000,
+                )
+            )

@@ -38,6 +38,42 @@ class FakeRunner:
         return FakeResult()
 
 
+class RecordingReasoningSynthesizer:
+    def __init__(self, answer="Pro 综合答案", error: Exception | None = None):
+        self.answer = answer
+        self.error = error
+        self.calls = []
+
+    async def synthesize(self, request):
+        self.calls.append(request)
+        if self.error is not None:
+            raise self.error
+        return self.answer
+
+
+class GroundedCrossDomainRunner(FakeRunner):
+    async def run(self, agent, input, **kwargs):
+        context = kwargs["context"]
+        for call_id, tool_name in (
+            ("call-approval", "approval_flow_expert"),
+            ("call-workflow", "workflow_expert"),
+        ):
+            context.start_tool(call_id, tool_name, "Manager Agent")
+            context.finish_tool(call_id, "completed", 1.0)
+        context.add_knowledge_citation(
+            "approval-workflow-code",
+            "审批通过触发工作流实现",
+            "审批流/工作流",
+            {
+                "source_type": "code",
+                "branch": "develop",
+                "relative_path": "ApprovalWorkflowService.java",
+                "symbol_name": "triggerWorkflow",
+            },
+        )
+        return FakeResult("Flash 草稿")
+
+
 class FakeStreamedResult(FakeResult):
     def __init__(self):
         super().__init__("流式完成")
@@ -595,6 +631,89 @@ async def test_agent_service_selects_restricted_manager_from_intent_router(tmp_p
     assert selected_manager == "workflow-manager"
     assert kwargs["context"].routing_domains == ["workflow"]
     assert kwargs["context"].routing_intent == "workflow"
+
+
+@pytest.mark.asyncio
+async def test_single_domain_answer_does_not_use_reasoning_synthesizer(tmp_path):
+    from knowledge.agent_runtime.intent_router import DomainIntentRouter
+
+    synthesizer = RecordingReasoningSynthesizer()
+    pending = PendingRunRepository(tmp_path / "agent.db")
+    await pending.initialize()
+    service = AgentService(
+        manager="root-manager",
+        domain_managers={"approval-flow": "approval-manager"},
+        intent_router=DomainIntentRouter(),
+        model_factory=FakeModelFactory(),
+        session_factory=AgentSessionFactory(tmp_path / "agent.db", 50),
+        pending_runs=pending,
+        runner=DuplicateCitationRunner(),
+        reasoning_synthesizer=synthesizer,
+    )
+
+    response = await service.chat(
+        "审批流管理员转办接口是什么",
+        "single-domain-reasoning",
+    )
+
+    assert response.answer == "根据代码证据回答"
+    assert synthesizer.calls == []
+
+
+@pytest.mark.asyncio
+async def test_grounded_cross_domain_answer_uses_reasoning_synthesizer(tmp_path):
+    from knowledge.agent_runtime.intent_router import DomainIntentRouter
+
+    synthesizer = RecordingReasoningSynthesizer()
+    pending = PendingRunRepository(tmp_path / "agent.db")
+    await pending.initialize()
+    service = AgentService(
+        manager="root-manager",
+        intent_router=DomainIntentRouter(),
+        model_factory=FakeModelFactory(),
+        session_factory=AgentSessionFactory(tmp_path / "agent.db", 50),
+        pending_runs=pending,
+        runner=GroundedCrossDomainRunner(),
+        reasoning_synthesizer=synthesizer,
+    )
+
+    response = await service.chat(
+        "审批通过后如何触发工作流连接器",
+        "cross-domain-reasoning",
+    )
+
+    assert response.answer == "Pro 综合答案"
+    assert len(synthesizer.calls) == 1
+    assert synthesizer.calls[0].draft == "Flash 草稿"
+    assert synthesizer.calls[0].domains == ("approval-flow", "workflow")
+    assert response.quality_spans[-1].name == "manager.reasoning_synthesis"
+    assert response.quality_spans[-1].status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_synthesis_failure_falls_back_to_flash_answer(tmp_path):
+    from knowledge.agent_runtime.intent_router import DomainIntentRouter
+
+    synthesizer = RecordingReasoningSynthesizer(error=TimeoutError())
+    pending = PendingRunRepository(tmp_path / "agent.db")
+    await pending.initialize()
+    service = AgentService(
+        manager="root-manager",
+        intent_router=DomainIntentRouter(),
+        model_factory=FakeModelFactory(),
+        session_factory=AgentSessionFactory(tmp_path / "agent.db", 50),
+        pending_runs=pending,
+        runner=GroundedCrossDomainRunner(),
+        reasoning_synthesizer=synthesizer,
+    )
+
+    response = await service.chat(
+        "审批通过后如何触发工作流连接器",
+        "cross-domain-reasoning-timeout",
+    )
+
+    assert response.answer == "Flash 草稿"
+    assert response.quality_spans[-1].status == "timeout"
 
 
 @pytest.mark.asyncio
