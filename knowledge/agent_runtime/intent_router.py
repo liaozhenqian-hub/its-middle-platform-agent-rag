@@ -93,7 +93,12 @@ class DomainIntentRouter:
         strong_bug = any(marker in normalized for marker in self._STRONG_BUG)
         weak_bug = any(marker in normalized for marker in self._WEAK_BUG)
         diagnosis_requested = any(marker in normalized for marker in self._DIAGNOSIS)
-        if strong_bug or (weak_bug and (not matched or diagnosis_requested)):
+        domain_lookup_requested = (
+            bool(matched)
+            and self._is_domain_lookup(normalized)
+            and not diagnosis_requested
+        )
+        if (strong_bug or (weak_bug and (not matched or diagnosis_requested))) and not domain_lookup_requested:
             return RoutingDecision(
                 domains=("bug",),
                 intent="bug",
@@ -101,6 +106,9 @@ class DomainIntentRouter:
                 reason_codes=("explicit_error_signal",),
                 task_type="bug",
             )
+
+        if domain_lookup_requested:
+            task_type = "api_contract"
 
         domains = tuple(item[0] for item in matched)
         reason_codes = tuple(item[1] for item in matched)
@@ -114,7 +122,11 @@ class DomainIntentRouter:
                 reason_codes=reason_codes,
                 task_type=task_type,
             )
-        vague = self._is_vague(normalized, domains[0])
+        vague = (
+            False
+            if domain_lookup_requested
+            else self._is_vague(normalized, domains[0])
+        )
         return RoutingDecision(
             domains=domains,
             intent=domains[0],
@@ -163,6 +175,17 @@ class DomainIntentRouter:
             "实例" in normalized
             and any(marker in normalized for marker in ("并发", "乱序", "重复执行"))
         )
+
+    @staticmethod
+    def _is_domain_lookup(normalized: str) -> bool:
+        interface_signal = any(
+            marker in normalized for marker in ("接口", "api", "url", "路径", "sdk")
+        )
+        existence_signal = any(
+            marker in normalized
+            for marker in ("是否有", "有没有", "是否存在", "有这个接口", "存在这个接口")
+        )
+        return interface_signal and existence_signal
 
     @classmethod
     def _is_vague(cls, normalized: str, domain: str) -> bool:

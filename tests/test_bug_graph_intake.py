@@ -54,6 +54,20 @@ async def test_intake_extracts_request_time_from_original_message():
 
 
 @pytest.mark.asyncio
+async def test_intake_extracts_trace_id_from_json_error_payload():
+    trace_id = "6de09eb4-9669-4d72-9061-bb42f18f43a0"
+
+    intake = await BugIntakeParser().parse(
+        f'开发环境接口报错，{{"code":"500","traceId":"{trace_id}"}}',
+        normalize=False,
+    )
+
+    assert intake.environment == "develop"
+    assert intake.trace_id == trace_id
+    assert intake.missing_fields == []
+
+
+@pytest.mark.asyncio
 async def test_intake_rejects_model_invented_trace_and_master_environment_guess():
     model = FakeNormalizer(
         [

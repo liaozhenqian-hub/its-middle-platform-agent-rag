@@ -54,6 +54,29 @@ def test_router_requires_real_error_signal_for_bug_route():
     assert bug.domains == ("bug",)
 
 
+def test_router_prefers_approval_contract_lookup_over_incidental_error_payload():
+    message = (
+        '/api/flow/task/adminTransferTask SDK调用报错，返回500，'
+        '"traceId":"6de09eb4-9669-4d72-9061-bb42f18f43a0"，'
+        '帮我看看审批流开发环境是否有这个接口'
+    )
+
+    decision = DomainIntentRouter().route(message)
+
+    assert decision.domains == ("approval-flow",)
+    assert decision.intent == "approval-flow"
+    assert decision.task_type == "api_contract"
+    assert decision.needs_clarification is False
+
+
+def test_router_keeps_explicit_root_cause_request_in_bug_graph():
+    decision = DomainIntentRouter().route(
+        '审批流接口报错500，traceId=6de09eb4-9669-4d72-9061-bb42f18f43a0，帮我查日志定位根因'
+    )
+
+    assert decision.domains == ("bug",)
+
+
 def test_router_keeps_product_capability_questions_out_of_bug_graph():
     router = DomainIntentRouter()
 

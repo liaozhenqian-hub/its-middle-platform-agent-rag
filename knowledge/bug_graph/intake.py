@@ -12,8 +12,8 @@ from knowledge.bug_graph.models import BugIntake, BugIntakeCandidate, Environmen
 
 _TRACE_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{6,200}$")
 _TRACE_IN_MESSAGE_PATTERN = re.compile(
-    r"(?i)(?:trace\s*id|traceid|trace_id|raceid|raceld|traceld|链路\s*id)\s*"
-    r"(?:是|为|[:：=])?\s*([A-Za-z0-9._:-]{6,200})"
+    r"(?i)[\"']?(?:trace\s*id|traceid|trace_id|raceid|raceld|traceld|链路\s*id)"
+    r"[\"']?\s*(?:(?:是|为|[:：=])\s*)?[\"']?([A-Za-z0-9._:-]{6,200})"
 )
 _STANDALONE_UUID_PATTERN = re.compile(
     r"^[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-"

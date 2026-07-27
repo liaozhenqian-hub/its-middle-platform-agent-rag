@@ -702,6 +702,34 @@ async def test_agent_service_selects_restricted_manager_from_intent_router(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_approval_interface_lookup_with_error_payload_bypasses_manager(tmp_path):
+    from knowledge.agent_runtime.intent_router import DomainIntentRouter
+
+    runner = FakeRunner()
+    pending = PendingRunRepository(tmp_path / "agent.db")
+    await pending.initialize()
+    service = AgentService(
+        manager="root-manager",
+        domain_managers={"approval-flow": "approval-manager"},
+        intent_router=DomainIntentRouter(),
+        model_factory=FakeModelFactory(),
+        session_factory=AgentSessionFactory(tmp_path / "agent.db", 50),
+        pending_runs=pending,
+        runner=runner,
+    )
+
+    await service.chat(
+        '/api/flow/task/adminTransferTask SDK调用报错，返回500，'
+        '"traceId":"6de09eb4-9669-4d72-9061-bb42f18f43a0"，'
+        '帮我看看审批流开发环境是否有这个接口',
+        "approval-contract-with-error-payload",
+    )
+
+    assert runner.calls[0][0] == "approval-manager"
+    assert runner.calls[0][2]["context"].routing_domains == ["approval-flow"]
+
+
+@pytest.mark.asyncio
 async def test_single_domain_answer_does_not_use_reasoning_synthesizer(tmp_path):
     from knowledge.agent_runtime.intent_router import DomainIntentRouter
 
