@@ -1,58 +1,58 @@
-# Hybrid Manager Reasoning Design
+# Manager 混合推理设计
 
-## Goal
+## 目标
 
-Improve complex cross-domain answer synthesis without making a reasoning model responsible for tool selection or execution.
+在不让推理模型承担工具选择和执行职责的前提下，提高复杂跨领域回答的综合质量。
 
-## Routing And Model Responsibilities
+## 路由与模型分工
 
-- High-confidence single-domain questions continue to bypass Manager and run the matching Flash specialist directly.
-- Bug questions continue to use the existing LangGraph flow: Flash for intake and evidence collection, Pro thinking only for final diagnosis.
-- Cross-domain questions use the Flash Manager to call specialists and collect evidence.
-- After Flash has completed tool execution, a tool-free Pro synthesizer may rewrite the grounded draft into the final answer.
-- Unknown questions that do not produce evidence or do not use multiple specialists are not upgraded to Pro.
+- 高置信度单领域问题继续绕过 Manager，直接运行对应的 Flash 专家。
+- Bug 问题继续使用现有 LangGraph：Flash 负责输入理解和证据收集，只有最终诊断使用 Pro 思考模式。
+- 跨领域问题由 Flash Manager 调用各领域专家并收集证据。
+- Flash 完成全部工具调用后，可由一个不带任何工具的 Pro 综合器把已有证据回答整理为最终答案。
+- 未知问题如果没有取得证据，或者没有实际调用多个专家，不升级到 Pro。
 
-## Pro Synthesis Gate
+## Pro 综合触发条件
 
-Pro synthesis runs only when all conditions are true:
+只有同时满足以下条件才执行 Pro 综合：
 
-1. Manager reasoning is enabled.
-2. The run completed without an approval interruption or clarification response.
-3. The request routed to multiple domains, or at least two domain specialists actually ran.
-4. At least one public citation exists.
-5. The Bug Graph did not handle the request.
+1. Manager 推理功能已启用。
+2. 本轮已完成，且不存在审批中断或澄清回答。
+3. 问题被路由到多个领域，或者实际调用了至少两个领域专家。
+4. 本轮至少存在一条可公开引用。
+5. 本轮没有交给 Bug Graph 处理。
 
-The synthesizer receives only the user question, the Flash draft, routed domain names, and bounded public citation summaries. It has no tools and must preserve evidence boundaries, unknown items, URLs, and citation meaning. It must not introduce new internal facts.
+Pro 综合器只接收用户原问题、Flash 回答草稿、路由领域名称和限长后的公开引用摘要。它不注册任何工具，必须保留证据边界、未知事项、URL 和引用含义，不得补充新的内部事实。
 
-## Runtime And Streaming
+## 运行与流式输出
 
-- Non-streaming chat waits for Pro synthesis and returns the synthesized answer.
-- Streaming chat exposes normal agent/tool lifecycle events while Flash gathers evidence, then streams only the final Pro answer.
-- Flash draft prose is buffered for eligible cross-domain runs so users do not see one answer replaced by another.
-- Pro timeout, provider failure, invalid empty output, or evidence-policy rejection falls back to the Flash draft.
-- A quality span records `manager.reasoning_synthesis` status and duration without recording prompts or answer bodies.
+- 非流式问答等待 Pro 综合完成后返回最终答案。
+- 流式问答在 Flash 收集证据期间正常发送 Agent 和工具状态，随后只流式输出 Pro 最终答案。
+- 对符合升级条件的跨领域请求，Flash 回答正文先在服务端缓冲，避免用户先看到一份答案，随后又被另一份答案替换。
+- Pro 超时、供应商异常、返回空内容或未通过证据策略时，回退到已有证据支持的 Flash 回答。
+- 质量追踪增加 `manager.reasoning_synthesis` span，只记录状态和耗时，不记录提示词或回答正文。
 
-## Configuration
+## 配置
 
 - `AGENT_MANAGER_REASONING_ENABLED=true`
 - `AGENT_MANAGER_REASONING_TIMEOUT_SECONDS=60`
 
-The feature uses the existing `DEEPSEEK_REASONING_MODEL`, `DEEPSEEK_REASONING_ENABLED`, and model factory. When the reasoning model is disabled or the provider is not DeepSeek, the service keeps the Flash/current-model result.
+该功能复用已有的 `DEEPSEEK_REASONING_MODEL`、`DEEPSEEK_REASONING_ENABLED` 和模型工厂。推理模型关闭或当前供应商不是 DeepSeek 时，服务保留 Flash 或当前模型生成的答案。
 
-## Safety And Evidence
+## 安全与证据边界
 
-- The Pro synthesizer never receives credentials, raw logs, embeddings, chunk IDs, source IDs, or complete tool output.
-- Existing citation sanitization and evidence-policy safeguards run after synthesis.
-- No new retrieval or MCP calls occur during synthesis.
-- Failure is fail-open to the already grounded Flash answer, not to an ungrounded generic response.
+- Pro 综合器不接收凭证、原始日志、Embedding、chunk ID、source ID 或完整工具输出。
+- Pro 综合完成后仍执行现有引用清理和证据策略门禁。
+- 综合阶段不得再次发起知识检索或 MCP 调用。
+- 综合失败时回退到已有证据支持的 Flash 回答，不能回退成无证据的通用回答。
 
-## Tests
+## 测试范围
 
-- Single-domain approval questions do not invoke Pro.
-- Cross-domain runs with citations invoke Pro once with thinking enabled.
-- Cross-domain runs without citations do not invoke Pro.
-- Clarification and Bug Graph responses do not invoke Pro.
-- Timeout, exception, and empty Pro output fall back to Flash.
-- Streaming emits the Pro answer once and does not leak the buffered Flash draft.
-- Runtime spans identify completed, timed-out, and failed synthesis.
+- 单领域审批流问题不调用 Pro。
+- 有引用的跨领域请求只调用一次 Pro，并开启 thinking。
+- 无引用的跨领域请求不调用 Pro。
+- 澄清回答和 Bug Graph 回答不调用 Pro。
+- Pro 超时、异常或返回空内容时回退到 Flash 回答。
+- 流式接口只输出一次 Pro 答案，不泄露被缓冲的 Flash 草稿。
+- 质量 span 能区分综合完成、超时和失败。
 
