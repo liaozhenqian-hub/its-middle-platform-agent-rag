@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import json
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from agents import Agent, ModelSettings, Runner
 
@@ -69,17 +69,37 @@ class ManagerReasoningSynthesizer:
             tools=[],
         )
 
-    async def synthesize(self, request: ReasoningSynthesisRequest) -> str:
+    async def synthesize(
+        self,
+        request: ReasoningSynthesisRequest,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
+    ) -> str:
+        run_config = self.run_config_factory(
+            request.conversation_id,
+            thinking=True,
+        )
         async with asyncio.timeout(self.timeout_seconds):
-            result = await self.runner.run(
-                self.agent,
-                self._build_input(request),
-                max_turns=1,
-                run_config=self.run_config_factory(
-                    request.conversation_id,
-                    thinking=True,
-                ),
-            )
+            if on_delta is None:
+                result = await self.runner.run(
+                    self.agent,
+                    self._build_input(request),
+                    max_turns=1,
+                    run_config=run_config,
+                )
+            else:
+                result = self.runner.run_streamed(
+                    self.agent,
+                    self._build_input(request),
+                    max_turns=1,
+                    run_config=run_config,
+                )
+                async for event in result.stream_events():
+                    if (
+                        event.type == "raw_response_event"
+                        and getattr(event.data, "type", "")
+                        == "response.output_text.delta"
+                    ):
+                        await on_delta(str(event.data.delta))
         answer = str(result.final_output).strip()
         if not answer:
             raise ValueError("reasoning synthesis returned an empty answer")

@@ -23,6 +23,27 @@ class RecordingRunner:
         return SimpleNamespace(final_output=self.answer)
 
 
+class RecordingStreamedResult:
+    def __init__(self):
+        self.final_output = "综合后的答案"
+
+    async def stream_events(self):
+        for delta in ("综合后的", "答案"):
+            yield SimpleNamespace(
+                type="raw_response_event",
+                data=SimpleNamespace(
+                    type="response.output_text.delta",
+                    delta=delta,
+                ),
+            )
+
+
+class RecordingStreamingRunner(RecordingRunner):
+    def run_streamed(self, agent, model_input, **kwargs):
+        self.calls.append((agent, model_input, kwargs))
+        return RecordingStreamedResult()
+
+
 def _request() -> ReasoningSynthesisRequest:
     return ReasoningSynthesisRequest(
         question="审批通过后如何触发工作流？",
@@ -121,3 +142,23 @@ async def test_synthesizer_times_out():
 
     with pytest.raises(TimeoutError):
         await synthesizer.synthesize(_request())
+
+
+@pytest.mark.asyncio
+async def test_synthesizer_forwards_streaming_text_deltas():
+    runner = RecordingStreamingRunner()
+    synthesizer = ManagerReasoningSynthesizer(
+        model="pro-model",
+        run_config_factory=lambda *_args, **_kwargs: None,
+        timeout_seconds=60,
+        runner=runner,
+    )
+    deltas = []
+
+    async def collect(delta: str):
+        deltas.append(delta)
+
+    answer = await synthesizer.synthesize(_request(), on_delta=collect)
+
+    assert answer == "综合后的答案"
+    assert deltas == ["综合后的", "答案"]

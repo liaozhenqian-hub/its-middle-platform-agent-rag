@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from agents import RunState, Runner
@@ -406,6 +406,7 @@ class AgentService:
             active_specialist_calls: set[str] = set()
             specialist_invoked = False
             manager_deltas_streamed = False
+            reasoning_candidate = self._is_reasoning_candidate(context)
             yield {
                 "event": "run.started",
                 "data": {
@@ -436,6 +437,13 @@ class AgentService:
                             delta = str(event.data.delta)
                             if active_specialist_calls:
                                 # Agent-as-tool output is internal evidence, not public prose.
+                                continue
+                            reasoning_candidate = (
+                                reasoning_candidate
+                                or self._is_reasoning_candidate(context)
+                            )
+                            if reasoning_candidate:
+                                buffered_manager_deltas.append(delta)
                                 continue
                             if specialist_invoked or self._specialist_invoked(context):
                                 buffered_manager_deltas.append(delta)
@@ -496,7 +504,44 @@ class AgentService:
                             },
                         }
 
-                response = await self._response_from_result(streamed, context, run_id)
+                synthesized_answer = None
+                if self._should_synthesize(context):
+                    synthesis_deltas: asyncio.Queue[str] = asyncio.Queue()
+
+                    async def collect_synthesis_delta(delta: str) -> None:
+                        await synthesis_deltas.put(delta)
+
+                    synthesis_task = asyncio.create_task(
+                        self._synthesize_answer(
+                            str(streamed.final_output),
+                            context.public_citations(self.public_citation_limit),
+                            context,
+                            on_delta=collect_synthesis_delta,
+                        )
+                    )
+                    while not synthesis_task.done() or not synthesis_deltas.empty():
+                        try:
+                            delta = await asyncio.wait_for(
+                                synthesis_deltas.get(), timeout=0.05
+                            )
+                        except TimeoutError:
+                            continue
+                        manager_deltas_streamed = True
+                        public_delta = public_answer_stream.feed(delta)
+                        if public_delta:
+                            yield {
+                                "event": "text.delta",
+                                "data": {"delta": public_delta},
+                            }
+                    synthesized_answer = await synthesis_task
+
+                response = await self._response_from_result(
+                    streamed,
+                    context,
+                    run_id,
+                    answer_override=synthesized_answer,
+                    allow_synthesis=False,
+                )
                 if response.status == "completed" and specialist_invoked:
                     if (
                         context.response_override is not None
@@ -672,6 +717,9 @@ class AgentService:
         result: Any,
         context: AgentRunContext,
         run_id: str,
+        *,
+        answer_override: str | None = None,
+        allow_synthesis: bool = True,
     ) -> AgentRunResponse:
         interruptions = list(getattr(result, "interruptions", []))
         if interruptions:
@@ -709,7 +757,7 @@ class AgentService:
             )
 
         citations = context.public_citations(self.public_citation_limit)
-        answer = str(result.final_output)
+        answer = answer_override if answer_override is not None else str(result.final_output)
         if context.response_override is not None:
             answer = context.response_override
         elif (
@@ -719,7 +767,7 @@ class AgentService:
         ):
             answer = EVIDENCE_UNAVAILABLE_ANSWER
         else:
-            if self._should_synthesize(context):
+            if allow_synthesis and self._should_synthesize(context):
                 answer = await self._synthesize_answer(answer, citations, context)
             if (
                 self._specialist_invoked(context)
@@ -956,11 +1004,16 @@ class AgentService:
 
     def _should_synthesize(self, context: AgentRunContext) -> bool:
         return bool(
+            self._is_reasoning_candidate(context)
+            and self._has_evidence(context)
+        )
+
+    def _is_reasoning_candidate(self, context: AgentRunContext) -> bool:
+        return bool(
             self.reasoning_synthesizer is not None
             and context.response_mode == "answer"
             and context.response_override is None
             and not self._bug_graph_invoked(context)
-            and self._has_evidence(context)
             and (
                 len(set(context.routing_domains)) > 1
                 or len(self._specialists_used(context)) > 1
@@ -972,18 +1025,23 @@ class AgentService:
         draft: str,
         citations: list[Citation],
         context: AgentRunContext,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
         started = asyncio.get_running_loop().time()
         status = "completed"
         try:
+            request = ReasoningSynthesisRequest(
+                question=context.current_user_message,
+                draft=draft,
+                domains=tuple(context.routing_domains),
+                citations=tuple(citations),
+                conversation_id=context.conversation_id,
+            )
+            if on_delta is None:
+                return await self.reasoning_synthesizer.synthesize(request)
             return await self.reasoning_synthesizer.synthesize(
-                ReasoningSynthesisRequest(
-                    question=context.current_user_message,
-                    draft=draft,
-                    domains=tuple(context.routing_domains),
-                    citations=tuple(citations),
-                    conversation_id=context.conversation_id,
-                )
+                request,
+                on_delta=on_delta,
             )
         except TimeoutError:
             status = "timeout"

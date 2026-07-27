@@ -260,6 +260,66 @@ class GroundedSpecialistStreamingRunner(FakeRunner):
         return GroundedSpecialistStream()
 
 
+class GroundedCrossDomainStream(FakeResult):
+    def __init__(self):
+        super().__init__("Flash 草稿")
+        self.cancelled = False
+
+    async def stream_events(self):
+        for call_id, tool_name in (
+            ("call-approval", "approval_flow_expert"),
+            ("call-workflow", "workflow_expert"),
+        ):
+            yield SimpleNamespace(
+                type="run_item_stream_event",
+                name="tool_called",
+                item=SimpleNamespace(
+                    raw_item=SimpleNamespace(name=tool_name, call_id=call_id)
+                ),
+            )
+            yield SimpleNamespace(
+                type="run_item_stream_event",
+                name="tool_output",
+                item=SimpleNamespace(raw_item={"call_id": call_id}, output="evidence"),
+            )
+        for delta in ("Flash ", "草稿"):
+            yield SimpleNamespace(
+                type="raw_response_event",
+                data=SimpleNamespace(type="response.output_text.delta", delta=delta),
+            )
+
+    def cancel(self):
+        self.cancelled = True
+
+
+class GroundedCrossDomainStreamingRunner(FakeRunner):
+    def run_streamed(self, agent, input, **kwargs):
+        context = kwargs["context"]
+        context.add_knowledge_citation(
+            "approval-workflow-code",
+            "审批通过触发工作流实现",
+            "审批流/工作流",
+            {
+                "source_type": "code",
+                "branch": "develop",
+                "relative_path": "ApprovalWorkflowService.java",
+                "symbol_name": "triggerWorkflow",
+            },
+        )
+        return GroundedCrossDomainStream()
+
+
+class StreamingReasoningSynthesizer(RecordingReasoningSynthesizer):
+    async def synthesize(self, request, on_delta=None):
+        self.calls.append(request)
+        if self.error is not None:
+            raise self.error
+        if on_delta is not None:
+            await on_delta("Pro ")
+            await on_delta("综合答案")
+        return self.answer
+
+
 class DuplicateCitationRunner(FakeRunner):
     async def run(self, agent, input, **kwargs):
         context = kwargs["context"]
@@ -691,6 +751,29 @@ async def test_grounded_cross_domain_answer_uses_reasoning_synthesizer(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_multiple_specialists_trigger_reasoning_when_rule_route_is_unknown(tmp_path):
+    synthesizer = RecordingReasoningSynthesizer()
+    pending = PendingRunRepository(tmp_path / "agent.db")
+    await pending.initialize()
+    service = AgentService(
+        manager="root-manager",
+        model_factory=FakeModelFactory(),
+        session_factory=AgentSessionFactory(tmp_path / "agent.db", 50),
+        pending_runs=pending,
+        runner=GroundedCrossDomainRunner(),
+        reasoning_synthesizer=synthesizer,
+    )
+
+    response = await service.chat(
+        "请综合相关中台能力",
+        "multi-specialist-reasoning",
+    )
+
+    assert response.answer == "Pro 综合答案"
+    assert len(synthesizer.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_reasoning_synthesis_failure_falls_back_to_flash_answer(tmp_path):
     from knowledge.agent_runtime.intent_router import DomainIntentRouter
 
@@ -892,6 +975,41 @@ async def test_agent_service_forwards_bug_diagnosis_deltas_before_tool_completio
 
     assert deltas == ["问题", "摘要"]
     assert names.index("text.delta") < names.index("tool.completed")
+
+
+@pytest.mark.asyncio
+async def test_cross_domain_stream_emits_only_pro_answer(tmp_path):
+    from knowledge.agent_runtime.intent_router import DomainIntentRouter
+
+    synthesizer = StreamingReasoningSynthesizer(answer="Pro 综合答案")
+    pending = PendingRunRepository(tmp_path / "agent.db")
+    await pending.initialize()
+    service = AgentService(
+        manager="root-manager",
+        intent_router=DomainIntentRouter(),
+        model_factory=FakeModelFactory(),
+        session_factory=AgentSessionFactory(tmp_path / "agent.db", 50),
+        pending_runs=pending,
+        runner=GroundedCrossDomainStreamingRunner(),
+        reasoning_synthesizer=synthesizer,
+    )
+
+    events = [
+        event
+        async for event in service.stream_chat(
+            "审批通过后如何触发工作流连接器",
+            "cross-domain-stream-reasoning",
+        )
+    ]
+
+    deltas = [
+        event["data"]["delta"]
+        for event in events
+        if event["event"] == "text.delta"
+    ]
+    assert "".join(deltas) == "Pro 综合答案"
+    assert "Flash 草稿" not in "".join(deltas)
+    assert events[-1]["data"]["answer"] == "Pro 综合答案"
 
 
 @pytest.mark.asyncio
