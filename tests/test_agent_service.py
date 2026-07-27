@@ -320,6 +320,14 @@ class StreamingReasoningSynthesizer(RecordingReasoningSynthesizer):
         return self.answer
 
 
+class PartiallyFailingReasoningSynthesizer(RecordingReasoningSynthesizer):
+    async def synthesize(self, request, on_delta=None):
+        self.calls.append(request)
+        if on_delta is not None:
+            await on_delta("Pro 部分输出")
+        raise RuntimeError("provider stream failed")
+
+
 class DuplicateCitationRunner(FakeRunner):
     async def run(self, agent, input, **kwargs):
         context = kwargs["context"]
@@ -1010,6 +1018,42 @@ async def test_cross_domain_stream_emits_only_pro_answer(tmp_path):
     assert "".join(deltas) == "Pro 综合答案"
     assert "Flash 草稿" not in "".join(deltas)
     assert events[-1]["data"]["answer"] == "Pro 综合答案"
+
+
+@pytest.mark.asyncio
+async def test_cross_domain_stream_does_not_mix_flash_after_partial_pro_failure(
+    tmp_path,
+):
+    from knowledge.agent_runtime.intent_router import DomainIntentRouter
+
+    pending = PendingRunRepository(tmp_path / "agent.db")
+    await pending.initialize()
+    service = AgentService(
+        manager="root-manager",
+        intent_router=DomainIntentRouter(),
+        model_factory=FakeModelFactory(),
+        session_factory=AgentSessionFactory(tmp_path / "agent.db", 50),
+        pending_runs=pending,
+        runner=GroundedCrossDomainStreamingRunner(),
+        reasoning_synthesizer=PartiallyFailingReasoningSynthesizer(),
+    )
+
+    events = [
+        event
+        async for event in service.stream_chat(
+            "审批通过后如何触发工作流连接器",
+            "cross-domain-partial-pro-failure",
+        )
+    ]
+
+    deltas = [
+        event["data"]["delta"]
+        for event in events
+        if event["event"] == "text.delta"
+    ]
+    assert "".join(deltas) == "Pro 部分输出"
+    assert events[-1]["event"] == "run.error"
+    assert all(event["event"] != "run.completed" for event in events)
 
 
 @pytest.mark.asyncio

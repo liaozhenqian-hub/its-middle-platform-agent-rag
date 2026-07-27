@@ -534,6 +534,11 @@ class AgentService:
                                 "data": {"delta": public_delta},
                             }
                     synthesized_answer = await synthesis_task
+                    synthesis_status = context.runtime_spans[-1].status
+                    if manager_deltas_streamed and synthesis_status != "completed":
+                        raise RuntimeError(
+                            "Manager reasoning synthesis stream was interrupted"
+                        )
 
                 response = await self._response_from_result(
                     streamed,
