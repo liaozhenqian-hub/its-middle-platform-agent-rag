@@ -1,6 +1,7 @@
 .env
 .codex/
 .superpowers/
+.worktrees/
 .idea/
 .venv/
 .venv-agent/
