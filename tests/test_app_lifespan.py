@@ -154,6 +154,15 @@ def test_production_lifespan_wires_catalog_scopes_and_swagger_provider(
         def __init__(self, path):
             captured["feishu_db"] = path
 
+        async def initialize(self):
+            return None
+
+    original_relational_factory = app_module.RelationalRepositoryFactory
+
+    class FakeRelationalFactory(original_relational_factory):
+        def feishu_events(self, path):
+            return FakeFeishuRepository(path)
+
     class FakeFeishuBridge:
         def __init__(self, **kwargs):
             captured["feishu_bridge"] = kwargs
@@ -173,7 +182,7 @@ def test_production_lifespan_wires_catalog_scopes_and_swagger_provider(
     monkeypatch.setattr(app_module, "AgentFactory", FakeAgentFactory)
     monkeypatch.setattr(app_module, "AgentService", lambda **kwargs: object())
     monkeypatch.setattr(app_module, "LarkOapiGateway", FakeFeishuGateway, raising=False)
-    monkeypatch.setattr(app_module, "FeishuEventRepository", FakeFeishuRepository, raising=False)
+    monkeypatch.setattr(app_module, "RelationalRepositoryFactory", FakeRelationalFactory)
     monkeypatch.setattr(app_module, "FeishuBotBridge", FakeFeishuBridge, raising=False)
 
     application = app_module.create_app()

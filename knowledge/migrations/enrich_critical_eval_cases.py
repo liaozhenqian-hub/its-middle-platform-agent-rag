@@ -51,6 +51,7 @@ def enrich(database_path: str | Path, *, apply: bool) -> dict[str, object]:
                     """UPDATE eval_cases SET required_tools_json=?,
                        required_citation_types_json=?, required_facts_json=?,
                        forbidden_facts_json=?, tags_json=?, task_type=?,
+                       max_tool_calls=?, expected_behavior=?,
                        suite='critical-v2', priority='critical', enabled=1,
                        updated_at=? WHERE id=?""",
                     (
@@ -60,6 +61,8 @@ def enrich(database_path: str | Path, *, apply: bool) -> dict[str, object]:
                         _json(definition["forbidden_facts"]),
                         _json(sorted(tags)),
                         definition["task_type"],
+                        definition["max_tool_calls"],
+                        definition["expected_behavior"],
                         now,
                         case_id,
                     ),

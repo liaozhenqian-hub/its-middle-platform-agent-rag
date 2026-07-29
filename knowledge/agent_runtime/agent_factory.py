@@ -70,6 +70,26 @@ SPECIALIST_RESPONSE_INSTRUCTIONS = """
 “文档：《管理员转办说明》”“接口：POST /transfer”“开发环境日志证据”。
 """.strip()
 
+TASK_RESPONSE_TEMPLATES = {
+    "api_contract": "结论\n接口地址与方法\n请求/响应字段\n必填与校验规则\n证据\n未确认事项",
+    "how_to": "结论\n适用场景\n操作步骤\n限制与注意事项\n证据\n未确认事项",
+    "requirement_analysis": "结论\n现有能力\n可行性与影响\n实施建议\n证据\n未确认事项",
+    "code_lookup": "结论\n代码位置\n实现说明\n验证方式\n证据\n未确认事项",
+}
+
+TASK_RESPONSE_INSTRUCTIONS = """
+根据 task_type 使用对应回答结构：api_contract、how_to、requirement_analysis、code_lookup。
+如果某一个用户要求的事实没有检索到证据，必须先明确提示“本次检索未找到该事实的明确证据”，
+然后继续输出其余已有证据支持的判断；不得因为一个字段未知而否定整项能力。
+回答必须分别列出“证据”和“未确认事项”，不要把推测写成已确认事实。
+""".strip()
+
+SPECIALIST_EVIDENCE_BOUNDARY_INSTRUCTIONS = """
+不得用“通常”“一般”“按常规”“理论上”等行业经验补齐内部产品事实、配置入口、字段或接口行为。
+证据只覆盖部分问题时，只回答已覆盖部分，并把其余部分明确列为未确认；不得为了完整性推测 UI、参数或默认值。
+接口字段只有在代码校验注解、Swagger required 定义或产品文档明确要求时才能标记为“必填”；普通字段声明不代表必填。
+""".strip()
+
 METRIC_INSTRUCTIONS = """
 你是指标平台专家。内部知识问题必须检索指标平台知识库，实时指标和实际数据只能使用指标 MCP。
 首次使用 MCP 时先调用 metricMcpInfo 理解规则。业务表述先调用 searchBizMetric，再调用 searchMetricApp
@@ -77,6 +97,13 @@ METRIC_INSTRUCTIONS = """
 用户没有在当前消息中明确选择指标应用时，prepare_metric_query 会返回 clarification_required，此时必须停止，
 展示候选并让用户确认，不能自行猜选。不得绕过 MCP 调用 Cube、数据库或底层 API。回答只标注中文可读的证据名称，不得输出 chunk ID、source ID 或内部工具标识。
 能力结论必须明确标注“已确认”“根据现有证据推断”或“本次检索暂未找到”；不得把未检索到实现表述为系统没有该能力。
+""".strip()
+
+METRIC_TOOL_ROUTING_INSTRUCTIONS = """
+指标定义、SDK 对接、配置方式、代码位置和产品能力说明必须调用 collect_domain_evidence；
+只有查询实时指标数值、指标应用候选或 SQL 时才调用指标 MCP。
+知识说明问题不得用 metricMcpInfo 代替知识库检索，也不得同时调用旧检索工具和聚合检索工具。
+同一轮中每个指标 MCP 发现工具最多调用一次；已有候选结果时必须复用，不得换同义词重复搜索。
 """.strip()
 
 APPROVAL_INSTRUCTIONS = """
@@ -126,6 +153,7 @@ class AgentFactory:
         metric_query_guard_enabled: bool = True,
         retrieval_max_calls: int = 3,
         retrieval_max_identical_queries: int = 1,
+        retrieval_timeout_seconds: float = 20,
         composite_evidence_enabled: bool = True,
         memory_service: Any | None = None,
         entity_memory_repository: Any | None = None,
@@ -138,6 +166,7 @@ class AgentFactory:
         self.metric_query_guard_enabled = metric_query_guard_enabled
         self.retrieval_max_calls = retrieval_max_calls
         self.retrieval_max_identical_queries = retrieval_max_identical_queries
+        self.retrieval_timeout_seconds = retrieval_timeout_seconds
         self.composite_evidence_enabled = composite_evidence_enabled
         self.memory_service = memory_service
         self.entity_memory_repository = entity_memory_repository
@@ -163,6 +192,7 @@ class AgentFactory:
                 agent_name=agent_name,
                 max_calls=min(3, self.retrieval_max_calls),
                 max_identical_queries=self.retrieval_max_identical_queries,
+                retrieval_timeout_seconds=self.retrieval_timeout_seconds,
             )]
         else:
             tools = [
@@ -183,7 +213,9 @@ class AgentFactory:
                     domain_id, domain_name, agent_name,
                 ),
             ]
-        if legacy_tool is not None:
+        # The composite collector supersedes the legacy RAG tool.  Exposing
+        # both makes the model launch duplicate searches for the same query.
+        if legacy_tool is not None and not self.composite_evidence_enabled:
             tools.insert(0, legacy_tool)
         return tools
 
@@ -213,6 +245,8 @@ class AgentFactory:
             name="指标平台专家",
             instructions=(
                 METRIC_INSTRUCTIONS
+                + "\n"
+                + METRIC_TOOL_ROUTING_INSTRUCTIONS
                 + (
                     "\n当前指标 MCP 可用，可以查询实时数据。"
                     if self.metric_mcp_server is not None
@@ -220,6 +254,9 @@ class AgentFactory:
                 )
                 + "\n"
                 + SPECIALIST_RESPONSE_INSTRUCTIONS
+                + "\n" + TASK_RESPONSE_INSTRUCTIONS
+                + "\n"
+                + SPECIALIST_EVIDENCE_BOUNDARY_INSTRUCTIONS
             ),
             model=self.model,
             model_settings=specialist_settings,
@@ -230,7 +267,11 @@ class AgentFactory:
         )
         approval = Agent[AgentRunContext](
             name="审批流专家",
-            instructions=APPROVAL_INSTRUCTIONS + "\n" + SPECIALIST_RESPONSE_INSTRUCTIONS,
+            instructions=(
+                APPROVAL_INSTRUCTIONS + "\n" + SPECIALIST_RESPONSE_INSTRUCTIONS
+                + "\n" + TASK_RESPONSE_INSTRUCTIONS
+                + "\n" + SPECIALIST_EVIDENCE_BOUNDARY_INSTRUCTIONS
+            ),
             model=self.model,
             model_settings=specialist_settings,
             tools=self._specialist_tools(
@@ -242,7 +283,11 @@ class AgentFactory:
         )
         workflow = Agent[AgentRunContext](
             name="工作流专家",
-            instructions=WORKFLOW_INSTRUCTIONS + "\n" + SPECIALIST_RESPONSE_INSTRUCTIONS,
+            instructions=(
+                WORKFLOW_INSTRUCTIONS + "\n" + SPECIALIST_RESPONSE_INSTRUCTIONS
+                + "\n" + TASK_RESPONSE_INSTRUCTIONS
+                + "\n" + SPECIALIST_EVIDENCE_BOUNDARY_INSTRUCTIONS
+            ),
             model=self.model,
             model_settings=specialist_settings,
             tools=self._specialist_tools(

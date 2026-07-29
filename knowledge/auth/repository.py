@@ -8,6 +8,9 @@ from uuid import uuid4
 
 import aiosqlite
 
+from knowledge.persistence.database import DatabaseResources
+from knowledge.persistence.sqlite_compat import PostgresCompatConnection
+
 from knowledge.auth.models import (
     AnonymousDevice,
     ConversationOwner,
@@ -933,6 +936,18 @@ class _Connection:
         if exc_type is not None:
             await self.connection.rollback()
         await self.connection.close()
+
+
+class PostgresUserAuthRepository(UserAuthRepository):
+    def __init__(self, database_resources: DatabaseResources):
+        self.database_resources = database_resources
+
+    async def initialize(self) -> None:
+        if not await self.database_resources.check_ready():
+            raise RuntimeError("PostgreSQL user-auth repository is unavailable")
+
+    def _connect(self) -> PostgresCompatConnection:
+        return PostgresCompatConnection(self.database_resources)
 
 
 def _required(value: str, name: str) -> str:

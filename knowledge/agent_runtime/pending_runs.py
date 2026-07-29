@@ -6,6 +6,11 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
+from sqlalchemy import delete, select, update, func
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+
+from knowledge.persistence.database import DatabaseResources
+from knowledge.persistence.schema import agent_pending_runs
 
 
 class PendingRunNotFoundError(LookupError):
@@ -141,3 +146,91 @@ class PendingRunRepository:
             return True
         except Exception:
             return False
+
+
+class PostgresPendingRunRepository:
+    def __init__(self, database_resources: DatabaseResources):
+        self.database_resources = database_resources
+
+    async def initialize(self) -> None:
+        if not await self.check_ready():
+            raise RuntimeError("PostgreSQL pending-run repository is unavailable")
+
+    async def save_pending(
+        self,
+        run_id: str,
+        conversation_id: str,
+        state: dict[str, Any],
+        approvals: list[dict[str, Any]],
+    ) -> None:
+        statement = (
+            postgres_insert(agent_pending_runs)
+            .values(
+                run_id=run_id,
+                conversation_id=conversation_id,
+                state=dict(state),
+                approvals=list(approvals),
+                status="pending",
+            )
+            .on_conflict_do_update(
+                index_elements=[agent_pending_runs.c.run_id],
+                set_={
+                    "state": dict(state),
+                    "approvals": list(approvals),
+                    "status": "pending",
+                    "updated_at": func.now(),
+                },
+            )
+        )
+        async with self.database_resources.transaction() as connection:
+            await connection.execute(statement)
+
+    async def get_pending(self, run_id: str) -> PendingRun:
+        statement = select(agent_pending_runs).where(agent_pending_runs.c.run_id == run_id)
+        async with self.database_resources.engine.connect() as connection:
+            row = (await connection.execute(statement)).mappings().one_or_none()
+        if row is None:
+            raise PendingRunNotFoundError(run_id)
+        if row["status"] != "pending":
+            raise PendingRunConflictError(run_id)
+        return PendingRun(
+            run_id=row["run_id"],
+            conversation_id=row["conversation_id"],
+            state=dict(row["state"]),
+            approvals=list(row["approvals"]),
+            status=row["status"],
+        )
+
+    async def mark_completed(self, run_id: str) -> None:
+        statement = (
+            update(agent_pending_runs)
+            .where(
+                agent_pending_runs.c.run_id == run_id,
+                agent_pending_runs.c.status == "pending",
+            )
+            .values(status="completed", updated_at=func.now())
+            .returning(agent_pending_runs.c.run_id)
+        )
+        async with self.database_resources.transaction() as connection:
+            updated = (await connection.execute(statement)).scalar_one_or_none()
+            if updated is not None:
+                return
+            exists = (
+                await connection.execute(
+                    select(agent_pending_runs.c.run_id).where(agent_pending_runs.c.run_id == run_id)
+                )
+            ).scalar_one_or_none()
+        if exists is None:
+            raise PendingRunNotFoundError(run_id)
+        raise PendingRunConflictError(run_id)
+
+    async def delete_conversation(self, conversation_id: str) -> None:
+        async with self.database_resources.transaction() as connection:
+            await connection.execute(
+                delete(agent_pending_runs).where(
+                    agent_pending_runs.c.conversation_id == conversation_id
+                )
+            )
+
+    async def check_ready(self) -> bool:
+        return await self.database_resources.check_ready()

@@ -8,6 +8,9 @@ from typing import Any, AsyncIterator
 
 import aiosqlite
 
+from knowledge.persistence.database import DatabaseResources
+from knowledge.persistence.sqlite_compat import PostgresCompatConnection
+
 from knowledge.auth.repository import UserAuthRepository
 from knowledge.history.models import (
     ConversationHistoryDetail,
@@ -164,6 +167,18 @@ class ConversationHistoryService:
             updated_at=_parse_datetime(session["updated_at"]),
             messages=messages,
         )
+
+
+class PostgresConversationHistoryService(ConversationHistoryService):
+    def __init__(self, auth_repository, database_resources: DatabaseResources):
+        self.auth_repository = auth_repository
+        self.database_resources = database_resources
+        self.session_database_path = Path("postgres")
+
+    @asynccontextmanager
+    async def _connect(self):
+        async with PostgresCompatConnection(self.database_resources) as connection:
+            yield connection
 
 
 def _public_message(row: aiosqlite.Row) -> PublicConversationMessage | None:

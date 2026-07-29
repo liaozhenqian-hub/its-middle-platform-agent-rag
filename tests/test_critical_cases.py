@@ -21,6 +21,8 @@ def _create_db(path):
             forbidden_facts_json TEXT NOT NULL DEFAULT '[]',
             task_type TEXT NOT NULL DEFAULT 'unknown',
             suite TEXT NOT NULL DEFAULT 'routing-breadth',
+            max_tool_calls INTEGER NOT NULL DEFAULT 4,
+            expected_behavior TEXT NOT NULL DEFAULT 'answer',
             priority TEXT NOT NULL DEFAULT 'critical', enabled INTEGER NOT NULL DEFAULT 1,
             updated_at TEXT NOT NULL DEFAULT ''
         )
@@ -39,7 +41,10 @@ def test_official_suite_is_exactly_30_and_each_case_has_constraints():
     for case_id in OFFICIAL_CRITICAL_CASE_IDS:
         definition = CRITICAL_CASE_DEFINITIONS[case_id]
         assert definition["facts"]
-        assert definition["citations"]
+        if case_id not in {
+            "write-delete-metric", "no-release-evidence", "no-swagger-evidence"
+        }:
+            assert definition["citations"]
 
 
 def test_enrich_critical_cases_is_idempotent_and_dry_run_does_not_mutate(tmp_path):
@@ -68,5 +73,7 @@ def test_enrich_critical_cases_is_idempotent_and_dry_run_does_not_mutate(tmp_pat
     for case_id, row in official.items():
         assert "official-critical-v2" in json.loads(row[2])
         assert json.loads(row[3])
-        assert json.loads(row[4])
-
+        if case_id not in {
+            "write-delete-metric", "no-release-evidence", "no-swagger-evidence"
+        }:
+            assert json.loads(row[4])

@@ -121,7 +121,9 @@ export const useQualityStore = defineStore("quality", {
       });
     },
     async loadEvalCases() {
-      this.evalCases = await api.get<EvalCase[]>("/v1/admin/quality/eval-cases");
+      this.evalCases = await api.get<EvalCase[]>(
+        "/v1/admin/quality/eval-cases?enabled=true",
+      );
     },
     async deleteEvalCase(caseId: string) {
       await this.runAction(async () => {

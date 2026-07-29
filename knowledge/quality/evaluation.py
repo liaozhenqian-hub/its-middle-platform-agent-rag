@@ -123,9 +123,11 @@ class QualityEvaluationService:
             )
             duration_ms = (perf_counter() - started_at) * 1000
             answer = str(getattr(response, "answer", None) or "")
+            tool_runs = list(getattr(response, "tool_runs", None) or [])
             tool_names = [
                 str(getattr(item, "tool_name", "") or "")
-                for item in list(getattr(response, "tool_runs", None) or [])
+                for item in tool_runs
+                if str(getattr(item, "status", "") or "") != "skipped"
             ]
             citations = list(getattr(response, "citations", None) or [])
             citation_types = [
@@ -159,7 +161,14 @@ class QualityEvaluationService:
             judge_score: float | None = None
             review_state = "not_required"
             passed = not failure_codes
-            if passed and self.semantic_judge is not None:
+            # Refusal and clarification cases are deterministic behavior/safety
+            # gates.  Sending them to a factual evidence judge adds cost and can
+            # turn a correct no-citation refusal into judge_error.
+            if (
+                passed
+                and self.semantic_judge is not None
+                and case.expected_behavior == "answer"
+            ):
                 try:
                     judge = await asyncio.wait_for(
                         self.semantic_judge.judge(

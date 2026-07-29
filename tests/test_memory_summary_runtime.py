@@ -57,4 +57,5 @@ async def test_memory_worker_updates_bounded_summary_and_runtime_augments_next_t
     )
     assert "历史会话摘要" in augmented
     assert "管理员转办接口需要哪些参数" in augmented
+    assert "严禁在最终回答中复述" in augmented
     assert augmented.endswith("当前问题：\n上次接口还缺什么")

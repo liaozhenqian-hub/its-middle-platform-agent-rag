@@ -2,7 +2,8 @@ from __future__ import annotations
 
 
 class BehaviorChecker:
-    CLARIFICATION_MARKERS = (
+    CLARIFICATION_MARKERS = ("需要您确认", "确认后我可以")
+    CLARIFICATION_MARKERS += (
         "请确认",
         "请您确认",
         "请提供",
@@ -37,7 +38,10 @@ class BehaviorChecker:
     @classmethod
     def matches(cls, expected: str, answer: str, tool_names: list[str]) -> bool:
         clarification = any(marker in answer for marker in cls.CLARIFICATION_MARKERS)
-        refusal = any(marker in answer for marker in cls.REFUSAL_MARKERS)
+        # A factual answer may mention a local limitation such as "this input
+        # cannot be queried".  Treat refusal as response-level only when it is
+        # stated near the beginning of the answer.
+        refusal = any(marker in answer[:240] for marker in cls.REFUSAL_MARKERS)
         if expected == "answer":
             return not refusal
         if expected == "clarify":

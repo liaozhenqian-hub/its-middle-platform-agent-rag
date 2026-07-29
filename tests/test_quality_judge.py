@@ -18,6 +18,13 @@ class FakeCompletions:
         )
 
 
+def test_semantic_judge_extracts_json_from_markdown_or_explanation():
+    payload = '{"score":80}'
+
+    assert DeepSeekSemanticJudge._extract_json(f"```json\n{payload}\n```") == payload
+    assert DeepSeekSemanticJudge._extract_json(f"结果如下：\n{payload}") == payload
+
+
 @pytest.mark.asyncio
 async def test_semantic_judge_repairs_invalid_json_once_and_validates_result():
     completions = FakeCompletions(

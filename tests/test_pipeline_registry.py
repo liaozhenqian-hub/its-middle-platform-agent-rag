@@ -1,4 +1,6 @@
 from knowledge.agent_runtime.pipeline_registry import RetrievalPipelineRegistry
+from knowledge.config.settings import Settings
+import knowledge.agent_runtime.pipeline_registry as registry_module
 
 
 def test_pipeline_registry_caches_by_fixed_application_and_domain():
@@ -43,3 +45,44 @@ def test_pipeline_registry_atomically_invalidates_affected_cached_pipelines():
     assert registry.invalidate(app_id="middle-platform") == 3
     assert registry.get("middle-platform", "审批流") is not approval
     assert registry.get("middle-platform", None) is not unscoped
+
+
+def test_pipeline_registry_uses_the_configured_vector_provider_factory(monkeypatch):
+    repository = object()
+    calls = []
+
+    def create(settings):
+        calls.append(settings.vector_store_provider)
+        return repository
+
+    monkeypatch.setattr(registry_module, "create_vector_store_repository", create)
+    settings = Settings(
+        _env_file=None,
+        VECTOR_STORE_PROVIDER="pgvector",
+        DATABASE_URL="postgresql://agent:secret@db.internal/middle_agent",
+        QUERY_REWRITE_ENABLED=False,
+        RERANK_ENABLED=False,
+    )
+
+    registry = RetrievalPipelineRegistry(settings=settings)
+
+    assert registry.repository is repository
+    assert calls == ["pgvector"]
+
+
+def test_pipeline_registry_closes_repository_resource():
+    class Repository:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    repository = Repository()
+    registry = RetrievalPipelineRegistry(
+        repository=repository,
+        pipeline_builder=lambda *_args: object(),
+    )
+
+    registry.close()
+
+    assert repository.closed is True

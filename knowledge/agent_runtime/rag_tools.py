@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from time import perf_counter
 from typing import Any, Protocol
 
@@ -241,6 +242,7 @@ def create_domain_evidence_tool(
     final_k: int = 5,
     max_calls: int = 3,
     max_identical_queries: int = 1,
+    retrieval_timeout_seconds: float = 20,
 ) -> FunctionTool:
     """Collect task-specific evidence while keeping scope and call count server-controlled."""
 
@@ -265,8 +267,47 @@ def create_domain_evidence_tool(
             {"$and": clauses},
         )
         _record_retrieval_spans(ctx.context, result)
+        search_results = [result]
+        exact_type_chunks: list[Any] = []
+        if source_type == "code" and ctx.context.task_type == "api_contract":
+            referenced_types: list[str] = []
+            for hit in result.final_results:
+                for identifier in re.findall(
+                    r"\b[A-Z][A-Za-z0-9]*(?:VO|DTO|Req|Resp|Request|Response)\b",
+                    str(hit.content or ""),
+                ):
+                    if identifier not in referenced_types and identifier not in query:
+                        referenced_types.append(identifier)
+                    if len(referenced_types) >= 2:
+                        break
+                if len(referenced_types) >= 2:
+                    break
+            if referenced_types:
+                for identifier in referenced_types:
+                    exact_type_chunks.extend(
+                        await asyncio.to_thread(
+                            registry.repository.get_chunks,
+                            {"$and": [*clauses, {"symbol_name": identifier}]},
+                            None,
+                        )
+                    )
+                if not exact_type_chunks:
+                    supplemental = await asyncio.to_thread(
+                        pipeline.search,
+                        " ".join(referenced_types) + " 字段定义",
+                        min(keyword_k, 12),
+                        min(vector_k, 12),
+                        final_k,
+                        {"$and": clauses},
+                    )
+                    _record_retrieval_spans(ctx.context, supplemental)
+                    search_results.append(supplemental)
         items: list[dict[str, Any]] = []
-        for item in result.final_results:
+        seen_chunks: set[str] = set()
+        for item in exact_type_chunks:
+            if item.chunk_id in seen_chunks:
+                continue
+            seen_chunks.add(item.chunk_id)
             ctx.context.add_knowledge_citation(
                 chunk_id=item.chunk_id,
                 heading=item.heading,
@@ -278,9 +319,28 @@ def create_domain_evidence_tool(
                     "chunk_id": item.chunk_id,
                     "heading": item.heading,
                     "content": item.content,
-                    "retrieval_routes": list(item.retrieval_routes),
+                    "retrieval_routes": ["exact_symbol"],
                 }
             )
+        for search_result in search_results:
+            for item in search_result.final_results:
+                if item.chunk_id in seen_chunks:
+                    continue
+                seen_chunks.add(item.chunk_id)
+                ctx.context.add_knowledge_citation(
+                    chunk_id=item.chunk_id,
+                    heading=item.heading,
+                    domain=domain_name,
+                    metadata=item.metadata,
+                )
+                items.append(
+                    {
+                        "chunk_id": item.chunk_id,
+                        "heading": item.heading,
+                        "content": item.content,
+                        "retrieval_routes": list(item.retrieval_routes),
+                    }
+                )
         return {"source_type": source_type, "results": items}
 
     async def inspect_swagger(
@@ -334,6 +394,17 @@ def create_domain_evidence_tool(
             call_id, "collect_domain_evidence", agent_name, {"task_type": ctx.context.task_type}
         )
         started_at = perf_counter()
+        if domain_id in ctx.context.evidence_collection_domains:
+            ctx.context.finish_tool(call_id, status="skipped", duration_ms=0.0)
+            return json.dumps(
+                {
+                    "status": "duplicate_query",
+                    "reuse_existing_evidence": True,
+                    "domain_id": domain_id,
+                },
+                ensure_ascii=False,
+            )
+        ctx.context.evidence_collection_domains.append(domain_id)
         task_type = ctx.context.task_type or "unknown"
         plans = {
             "how_to": ["product_document"],
@@ -367,8 +438,18 @@ def create_domain_evidence_tool(
             executed.append(modality)
             try:
                 if modality == "swagger":
-                    return await inspect_swagger(ctx, query)
-                return await search_modality(ctx, query, modality)
+                    operation = inspect_swagger(ctx, query)
+                else:
+                    operation = search_modality(ctx, query, modality)
+                return await asyncio.wait_for(
+                    operation, timeout=retrieval_timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                return {
+                    "source_type": modality,
+                    "error": "retrieval_timeout",
+                    "timeout_seconds": retrieval_timeout_seconds,
+                }
             except Exception:
                 return {"source_type": modality, "error": "retrieval_unavailable"}
 

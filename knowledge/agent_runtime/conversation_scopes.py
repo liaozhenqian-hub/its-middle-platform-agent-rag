@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import AsyncIterator
 
 import aiosqlite
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+
+from knowledge.persistence.database import DatabaseResources
+from knowledge.persistence.schema import agent_conversation_scopes
 
 
 class ConversationScopeConflictError(RuntimeError):
@@ -128,4 +133,78 @@ class ConversationScopeRepository:
             knowledge_space_id=row["knowledge_space_id"],
             domain_id=row["domain_id"],
             created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+
+class PostgresConversationScopeRepository:
+    def __init__(self, database_resources: DatabaseResources):
+        self.database_resources = database_resources
+
+    async def initialize(self) -> None:
+        if not await self.database_resources.check_ready():
+            raise RuntimeError("PostgreSQL conversation-scope repository is unavailable")
+
+    async def bind(
+        self,
+        conversation_id: str,
+        knowledge_space_id: str,
+        domain_id: str | None,
+    ) -> ConversationScope:
+        conversation_id = conversation_id.strip()
+        knowledge_space_id = knowledge_space_id.strip()
+        domain_id = domain_id.strip() if domain_id and domain_id.strip() else None
+        if not conversation_id or not knowledge_space_id:
+            raise ValueError("conversation and knowledge space IDs are required")
+        async with self.database_resources.transaction() as connection:
+            await connection.execute(
+                postgres_insert(agent_conversation_scopes)
+                .values(
+                    conversation_id=conversation_id,
+                    knowledge_space_id=knowledge_space_id,
+                    domain_id=domain_id,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[agent_conversation_scopes.c.conversation_id]
+                )
+            )
+            row = (
+                await connection.execute(
+                    select(agent_conversation_scopes).where(
+                        agent_conversation_scopes.c.conversation_id == conversation_id
+                    )
+                )
+            ).mappings().one()
+        if row["knowledge_space_id"] != knowledge_space_id or row["domain_id"] != domain_id:
+            raise ConversationScopeConflictError(
+                "conversation is already bound to a different knowledge scope"
+            )
+        return self._from_mapping(row)
+
+    async def get(self, conversation_id: str) -> ConversationScope | None:
+        async with self.database_resources.engine.connect() as connection:
+            row = (
+                await connection.execute(
+                    select(agent_conversation_scopes).where(
+                        agent_conversation_scopes.c.conversation_id == conversation_id
+                    )
+                )
+            ).mappings().one_or_none()
+        return self._from_mapping(row) if row is not None else None
+
+    async def delete(self, conversation_id: str) -> bool:
+        async with self.database_resources.transaction() as connection:
+            result = await connection.execute(
+                delete(agent_conversation_scopes).where(
+                    agent_conversation_scopes.c.conversation_id == conversation_id
+                )
+            )
+        return result.rowcount == 1
+
+    @staticmethod
+    def _from_mapping(row) -> ConversationScope:
+        return ConversationScope(
+            conversation_id=row["conversation_id"],
+            knowledge_space_id=row["knowledge_space_id"],
+            domain_id=row["domain_id"],
+            created_at=row["created_at"],
         )

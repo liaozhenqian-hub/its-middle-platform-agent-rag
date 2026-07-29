@@ -2,6 +2,14 @@ chromadb>=0.5.23
 langchain-chroma>=0.1.4
 langchain-core>=0.3.0
 langchain-openai>=0.2.0
+langgraph==1.2.9
+langgraph-checkpoint-sqlite==3.1.0
+langgraph-checkpoint-postgres==3.1.0
+SQLAlchemy>=2.0.36,<3
+asyncpg>=0.30,<1
+alembic>=1.14,<2
+psycopg[binary,pool]>=3.2,<4
+pgvector>=0.5,<1
 openai>=2.45,<3
 openai-agents==0.18.2
 lark-oapi==1.7.1

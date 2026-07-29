@@ -22,6 +22,7 @@ from pathlib import Path
 import httpx
 from openai import AsyncOpenAI, OpenAI
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -129,11 +130,14 @@ from knowledge.memory.repository import MemoryRepository
 from knowledge.memory.service import MemoryService
 from knowledge.memory.summarizer import ConversationSummaryService
 from knowledge.memory.worker import MemoryExtractionWorker
+from knowledge.persistence.database import DatabaseResources
+from knowledge.persistence.postgres_urls import postgres_saver_url
+from knowledge.persistence.factory import RelationalRepositoryFactory
 from knowledge.history.service import (
     ConversationHistoryNotFound,
     ConversationHistoryService,
 )
-from knowledge.repositories.vector_store_repository import VectorStoreRepository
+from knowledge.repositories.vector_store_factory import create_vector_store_repository
 from knowledge.source_sync import (
     GitLabClient,
     GitRepositoryManager,
@@ -171,6 +175,33 @@ def _build_manager_reasoning_synthesizer(
         run_config_factory=model_factory.create_run_config,
         timeout_seconds=settings.agent_manager_reasoning_timeout_seconds,
     )
+
+
+def _build_agent_session_factory(
+    settings: Settings,
+    database_resources: DatabaseResources,
+) -> AgentSessionFactory:
+    return AgentSessionFactory(
+        settings.resolved_agent_session_db,
+        settings.agent_session_history_limit,
+        provider=settings.data_store_provider,
+        database_resources=(
+            database_resources
+            if settings.data_store_provider == "postgres"
+            else None
+        ),
+    )
+
+
+def _bug_graph_saver_context(settings: Settings):
+    if settings.data_store_provider == "postgres":
+        saver_url = postgres_saver_url(
+            settings.resolved_psycopg_url,
+            schema=settings.database_schema,
+        )
+        return AsyncPostgresSaver.from_conn_string(saver_url)
+    settings.resolved_bug_graph_db.parent.mkdir(parents=True, exist_ok=True)
+    return AsyncSqliteSaver.from_conn_string(str(settings.resolved_bug_graph_db))
 
 def _sse(event: dict[str, Any]) -> str:
     return (
@@ -235,12 +266,30 @@ def create_app(
 
         settings = Settings()
         configure_logging(settings)
+        database_resources = DatabaseResources(settings)
+        await database_resources.start()
+        application.state._runtime_cleanup.push_async_callback(
+            database_resources.close
+        )
+        postgres_ready = (
+            await database_resources.check_ready()
+            if database_resources.enabled
+            else False
+        )
+        relational_repositories = RelationalRepositoryFactory(
+            provider=settings.data_store_provider,
+            database_resources=(
+                database_resources
+                if settings.data_store_provider == "postgres"
+                else None
+            ),
+        )
         user_auth_service = None
         user_auth_repository = None
         user_auth_status = "disabled"
         if settings.user_auth_enabled:
             try:
-                user_auth_repository = UserAuthRepository(
+                user_auth_repository = relational_repositories.user_auth(
                     settings.resolved_user_auth_db
                 )
                 await user_auth_repository.initialize()
@@ -256,13 +305,17 @@ def create_app(
                 )
                 user_auth_service = None
                 user_auth_status = "unavailable"
-        pending_runs = PendingRunRepository(settings.resolved_agent_session_db)
+        pending_runs = relational_repositories.pending_runs(
+            settings.resolved_agent_session_db
+        )
         await pending_runs.initialize()
-        conversation_scopes = ConversationScopeRepository(
+        conversation_scopes = relational_repositories.conversation_scopes(
             settings.resolved_agent_session_db
         )
         await conversation_scopes.initialize()
-        catalog = CatalogRepository(settings.resolved_knowledge_catalog_db)
+        catalog = relational_repositories.catalog(
+            settings.resolved_knowledge_catalog_db
+        )
         await catalog.initialize()
         memory_repository = None
         memory_service = None
@@ -272,19 +325,23 @@ def create_app(
         memory_worker_status = "disabled"
         if settings.memory_enabled:
             try:
-                memory_repository = MemoryRepository(settings.resolved_memory_db)
+                memory_repository = relational_repositories.memory(
+                    settings.resolved_memory_db
+                )
                 await memory_repository.initialize()
                 await memory_repository.expire_memories()
-                entity_memory_repository = EntityMemoryRepository(
+                entity_memory_repository = relational_repositories.memory_entities(
                     settings.resolved_memory_db
                 )
                 await entity_memory_repository.initialize()
                 memory_index = None
                 if settings.resolved_embedding_api_key:
-                    memory_index = MemoryIndex(VectorStoreRepository.from_settings(
-                        settings,
-                        collection_name=settings.memory_chroma_collection_name,
-                    ))
+                    memory_index = MemoryIndex(
+                        create_vector_store_repository(
+                            settings,
+                            collection_name=settings.memory_chroma_collection_name,
+                        )
+                    )
                 extractor = None
                 if settings.memory_extraction_enabled and settings.resolved_deepseek_api_key:
                     extractor = MemoryExtractor(
@@ -336,7 +393,9 @@ def create_app(
         quality_status = "disabled"
         if settings.agent_quality_enabled:
             try:
-                quality_repository = QualityRepository(settings.resolved_agent_quality_db)
+                quality_repository = relational_repositories.quality(
+                    settings.resolved_agent_quality_db
+                )
                 await quality_repository.initialize()
                 await quality_repository.recover_stale_running(
                     settings.agent_quality_running_timeout_seconds
@@ -436,6 +495,9 @@ def create_app(
             )
             manager_reasoning_synthesizer = None
         registry = RetrievalPipelineRegistry(settings=settings)
+        registry_close = getattr(registry, "close", None)
+        if callable(registry_close):
+            application.state._runtime_cleanup.callback(registry_close)
         await asyncio.to_thread(
             registry.warm,
             [
@@ -455,17 +517,10 @@ def create_app(
                 bug_graph_status = "unavailable"
             else:
                 try:
-                    settings.resolved_bug_graph_db.parent.mkdir(
-                        parents=True,
-                        exist_ok=True,
-                    )
-                    saver_context = AsyncSqliteSaver.from_conn_string(
-                        str(settings.resolved_bug_graph_db)
-                    )
+                    saver_context = _bug_graph_saver_context(settings)
                     saver = await application.state._runtime_cleanup.enter_async_context(
                         saver_context
                     )
-                    await saver.setup()
                     diagnosis_model = model
                     if (
                         settings.agent_model_provider == "deepseek"
@@ -546,6 +601,7 @@ def create_app(
             retrieval_max_identical_queries=(
                 settings.agent_retrieval_max_identical_queries
             ),
+            retrieval_timeout_seconds=settings.agent_retrieval_timeout_seconds,
             composite_evidence_enabled=settings.agent_composite_evidence_enabled,
             memory_service=memory_service,
             entity_memory_repository=entity_memory_repository,
@@ -569,9 +625,9 @@ def create_app(
             ),
             intent_router_min_confidence=settings.agent_intent_router_min_confidence,
             model_factory=model_factory,
-            session_factory=AgentSessionFactory(
-                settings.resolved_agent_session_db,
-                settings.agent_session_history_limit,
+            session_factory=_build_agent_session_factory(
+                settings,
+                database_resources,
             ),
             pending_runs=pending_runs,
             scope_repository=conversation_scopes,
@@ -595,7 +651,7 @@ def create_app(
             application.state._runtime_cleanup.push_async_callback(judge_client.close)
             semantic_judge = DeepSeekSemanticJudge(
                 client=judge_client,
-                model=settings.deepseek_reasoning_model,
+                model=settings.agent_quality_judge_model,
             )
         quality_evaluator = (
             QualityEvaluationService(
@@ -610,6 +666,7 @@ def create_app(
                 ),
                 semantic_judge=semantic_judge,
                 case_timeout_seconds=settings.agent_quality_eval_case_timeout_seconds,
+                judge_timeout_seconds=settings.agent_quality_judge_timeout_seconds,
                 run_config_snapshot={
                     "prompt_version": settings.agent_prompt_version,
                     "knowledge_count": registry.repository.count(),
@@ -649,7 +706,9 @@ def create_app(
             feishu_bridge = FeishuBotBridge(
                 gateway=gateway,
                 agent_service=service,
-                repository=FeishuEventRepository(settings.resolved_feishu_event_db),
+                repository=relational_repositories.feishu_events(
+                    settings.resolved_feishu_event_db
+                ),
                 quality_capture=quality_capture,
                 reply_max_chars=settings.feishu_reply_max_chars,
                 agent_timeout_seconds=settings.feishu_agent_timeout_seconds,
@@ -762,13 +821,26 @@ def create_app(
         application.state.memory_worker = memory_worker
         application.state.entity_memory_repository = entity_memory_repository
         application.state.user_auth_service = user_auth_service
+        application.state.database_resources = database_resources
         application.state.conversation_history_service = (
-            ConversationHistoryService(
+            relational_repositories.history(
                 user_auth_repository, settings.resolved_agent_session_db
             )
             if user_auth_repository is not None
             else None
         )
+        sqlite_ready = await pending_runs.check_ready()
+        vector_count = registry.repository.count()
+        relational_status = (
+            "available"
+            if (
+                postgres_ready
+                if settings.data_store_provider == "postgres"
+                else sqlite_ready
+            )
+            else "unavailable"
+        )
+        vector_status = "available"
         application.state.component_status = {
             "model": {
                 "status": "available",
@@ -788,14 +860,47 @@ def create_app(
                 ),
             },
             "sqlite": {
-                "status": "available"
-                if await pending_runs.check_ready()
-                else "unavailable"
+                "status": (
+                    "available"
+                    if settings.data_store_provider == "sqlite" and sqlite_ready
+                    else "disabled"
+                )
             },
             "chroma": {
-                "status": "available",
+                "status": (
+                    "available"
+                    if settings.vector_store_provider == "chroma"
+                    else "disabled"
+                ),
                 "collection": settings.chroma_collection_name,
-                "count": registry.repository.count(),
+                "count": vector_count,
+            },
+            "database": {
+                "status": relational_status,
+                "provider": settings.data_store_provider,
+            },
+            "vector_store": {
+                "status": vector_status,
+                "provider": settings.vector_store_provider,
+                "collection": settings.chroma_collection_name,
+                "count": vector_count,
+                "shadow_enabled": settings.vector_shadow_enabled,
+            },
+            "postgres": {
+                "status": "available" if postgres_ready else (
+                    "unavailable" if database_resources.enabled else "disabled"
+                )
+            },
+            "pgvector": {
+                "status": (
+                    "available"
+                    if settings.vector_store_provider == "pgvector" and postgres_ready
+                    else (
+                        "shadow"
+                        if settings.vector_shadow_enabled and postgres_ready
+                        else "disabled"
+                    )
+                )
             },
             "mcp": {"status": mcp_client.status},
             "grafana_logs": {"status": grafana_status},
@@ -2697,7 +2802,13 @@ def create_app(
             and connected is False
         ):
             components["feishu_bot"] = {"status": "unavailable"}
-        critical = ("model", "sqlite", "chroma")
+        relational_component = (
+            "database" if "database" in components else "sqlite"
+        )
+        vector_component = (
+            "vector_store" if "vector_store" in components else "chroma"
+        )
+        critical = ("model", relational_component, vector_component)
         critical_ready = all(
             components.get(name, {}).get("status") == "available" for name in critical
         )

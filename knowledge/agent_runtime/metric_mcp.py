@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import logging
+import json
+import time
+from collections import OrderedDict
 from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
@@ -11,6 +14,53 @@ from knowledge.config.settings import Settings
 
 
 logger = logging.getLogger(__name__)
+
+
+class MetricMCPResultCache:
+    """Bounded, TTL-scoped cache for read-only metric MCP results."""
+
+    def __init__(self, *, ttl_seconds: float = 30.0, max_entries: int = 256):
+        self.ttl_seconds = max(1.0, float(ttl_seconds))
+        self.max_entries = max(1, int(max_entries))
+        self._items: OrderedDict[str, tuple[float, Any]] = OrderedDict()
+
+    @staticmethod
+    def _key(user_id: str, conversation_id: str, tool_name: str, arguments: Any) -> str:
+        return json.dumps(
+            [user_id, conversation_id, tool_name, MetricMCPResultCache._normalize(arguments)],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def _normalize(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {str(key): MetricMCPResultCache._normalize(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [MetricMCPResultCache._normalize(item) for item in value]
+        if isinstance(value, str):
+            return "".join(value.split())
+        return value
+
+    def get(self, user_id: str, conversation_id: str, tool_name: str, arguments: Any) -> Any | None:
+        key = self._key(user_id, conversation_id, tool_name, arguments)
+        item = self._items.get(key)
+        if item is None:
+            return None
+        expires_at, value = item
+        if expires_at <= time.monotonic():
+            self._items.pop(key, None)
+            return None
+        self._items.move_to_end(key)
+        return value
+
+    def put(self, user_id: str, conversation_id: str, tool_name: str, arguments: Any, value: Any) -> None:
+        key = self._key(user_id, conversation_id, tool_name, arguments)
+        self._items[key] = (time.monotonic() + self.ttl_seconds, value)
+        self._items.move_to_end(key)
+        while len(self._items) > self.max_entries:
+            self._items.popitem(last=False)
 
 METRIC_MCP_ALLOWED_TOOLS = (
     "metricMcpInfo",

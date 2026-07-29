@@ -658,7 +658,8 @@ class AgentService:
             return message
         block = "\n".join(lines)[:3000]
         return (
-            "相关历史上下文（仅为已确认的偏好/上下文，不可替代知识库证据）：\n"
+            "相关历史上下文（仅供内部推理，不可替代知识库证据；"
+            "严禁在最终回答中复述标题、记忆类型或内容列表）：\n"
             f"{block}\n\n当前问题：\n{message}"
         )
 

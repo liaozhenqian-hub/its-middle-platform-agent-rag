@@ -1,5 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
+import re
+from urllib.parse import quote
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -8,6 +10,9 @@ PLACEHOLDER_VALUES = {"", "<fill-locally>", "你的阿里云百炼APIKey"}
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 VALID_AGENT_PROVIDERS = {"openai", "deepseek"}
+VALID_DATA_STORE_PROVIDERS = {"sqlite", "postgres"}
+VALID_VECTOR_STORE_PROVIDERS = {"chroma", "pgvector"}
+POSTGRES_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _usable(value: str) -> str:
@@ -73,6 +78,84 @@ class Settings(BaseSettings):
     chroma_collection_name: str = Field(
         default="metric_platform_knowledge",
         alias="CHROMA_COLLECTION_NAME",
+    )
+
+    data_store_provider: str = Field(
+        default="sqlite",
+        alias="DATA_STORE_PROVIDER",
+    )
+    database_url: str = Field(default="", alias="DATABASE_URL", repr=False)
+    pghost: str = Field(default="", alias="PGHOST")
+    pgport: int = Field(default=5432, gt=0, le=65535, alias="PGPORT")
+    pgdatabase: str = Field(default="", alias="PGDATABASE")
+    pguser: str = Field(default="", alias="PGUSER")
+    pgpassword: str = Field(default="", alias="PGPASSWORD", repr=False)
+    database_schema: str = Field(default="public", alias="DATABASE_SCHEMA")
+    database_pool_size: int = Field(
+        default=5,
+        ge=1,
+        le=100,
+        alias="DATABASE_POOL_SIZE",
+    )
+    database_max_overflow: int = Field(
+        default=5,
+        ge=0,
+        le=200,
+        alias="DATABASE_MAX_OVERFLOW",
+    )
+    database_pool_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        le=300,
+        alias="DATABASE_POOL_TIMEOUT_SECONDS",
+    )
+    database_statement_timeout_seconds: int = Field(
+        default=30,
+        gt=0,
+        le=3600,
+        alias="DATABASE_STATEMENT_TIMEOUT_SECONDS",
+    )
+    database_migration_batch_size: int = Field(
+        default=5000,
+        ge=1,
+        le=50000,
+        alias="DATABASE_MIGRATION_BATCH_SIZE",
+    )
+    vector_store_provider: str = Field(
+        default="chroma",
+        alias="VECTOR_STORE_PROVIDER",
+    )
+    vector_shadow_enabled: bool = Field(
+        default=False,
+        alias="VECTOR_SHADOW_ENABLED",
+    )
+    vector_shadow_sample_rate: float = Field(
+        default=1.0,
+        gt=0,
+        le=1,
+        alias="VECTOR_SHADOW_SAMPLE_RATE",
+    )
+    pgvector_schema: str = Field(default="public", alias="PGVECTOR_SCHEMA")
+    pgvector_table: str = Field(
+        default="vector_entries",
+        alias="PGVECTOR_TABLE",
+    )
+    pgvector_batch_size: int = Field(
+        default=500,
+        ge=1,
+        le=5000,
+        alias="PGVECTOR_BATCH_SIZE",
+    )
+    pgvector_hnsw_ef_search: int = Field(
+        default=100,
+        ge=1,
+        le=1000,
+        alias="PGVECTOR_HNSW_EF_SEARCH",
+    )
+    pgvector_dimensions: int = Field(
+        default=1024,
+        ge=1,
+        alias="PGVECTOR_DIMENSIONS",
     )
 
     chunk_max_chars: int = Field(default=1800, alias="CHUNK_MAX_CHARS")
@@ -143,6 +226,12 @@ class Settings(BaseSettings):
         default=1,
         ge=1,
         alias="AGENT_RETRIEVAL_MAX_IDENTICAL_QUERIES",
+    )
+    agent_retrieval_timeout_seconds: float = Field(
+        default=20,
+        gt=0,
+        le=120,
+        alias="AGENT_RETRIEVAL_TIMEOUT_SECONDS",
     )
     agent_public_citation_limit: int = Field(
         default=10,
@@ -241,6 +330,16 @@ class Settings(BaseSettings):
     )
     agent_quality_semantic_judge_enabled: bool = Field(
         default=True, alias="AGENT_QUALITY_SEMANTIC_JUDGE_ENABLED"
+    )
+    agent_quality_judge_model: str = Field(
+        default="deepseek-v4-flash",
+        alias="AGENT_QUALITY_JUDGE_MODEL",
+    )
+    agent_quality_judge_timeout_seconds: float = Field(
+        default=20,
+        gt=0,
+        le=120,
+        alias="AGENT_QUALITY_JUDGE_TIMEOUT_SECONDS",
     )
     agent_quality_eval_worker_enabled: bool = Field(
         default=True, alias="AGENT_QUALITY_EVAL_WORKER_ENABLED"
@@ -541,6 +640,32 @@ class Settings(BaseSettings):
             raise ValueError(f"AGENT_MODEL_PROVIDER must be one of: {allowed}")
         return normalized
 
+    @field_validator("data_store_provider", mode="before")
+    @classmethod
+    def normalize_data_store_provider(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        if normalized not in VALID_DATA_STORE_PROVIDERS:
+            allowed = ", ".join(sorted(VALID_DATA_STORE_PROVIDERS))
+            raise ValueError(f"DATA_STORE_PROVIDER must be one of: {allowed}")
+        return normalized
+
+    @field_validator("vector_store_provider", mode="before")
+    @classmethod
+    def normalize_vector_store_provider(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        if normalized not in VALID_VECTOR_STORE_PROVIDERS:
+            allowed = ", ".join(sorted(VALID_VECTOR_STORE_PROVIDERS))
+            raise ValueError(f"VECTOR_STORE_PROVIDER must be one of: {allowed}")
+        return normalized
+
+    @field_validator("database_schema", "pgvector_schema", "pgvector_table")
+    @classmethod
+    def validate_postgres_identifier(cls, value: str) -> str:
+        normalized = str(value).strip()
+        if not POSTGRES_IDENTIFIER_PATTERN.fullmatch(normalized):
+            raise ValueError("PostgreSQL identifiers must contain only letters, digits, and underscores")
+        return normalized
+
     @field_validator("user_public_base_url", mode="before")
     @classmethod
     def normalize_user_public_base_url(cls, value: str) -> str:
@@ -579,7 +704,75 @@ class Settings(BaseSettings):
             raise ValueError(
                 "user session sliding TTL cannot exceed absolute TTL"
             )
+        requires_postgres = bool(
+            self.data_store_provider == "postgres"
+            or self.vector_store_provider == "pgvector"
+            or self.vector_shadow_enabled
+        )
+        if requires_postgres:
+            if not _usable(self.database_url) and not all(
+                _usable(value)
+                for value in (
+                    self.pghost,
+                    self.pgdatabase,
+                    self.pguser,
+                    self.pgpassword,
+                )
+            ):
+                raise ValueError(
+                    "PostgreSQL configuration requires DATABASE_URL or complete "
+                    "PGHOST/PGDATABASE/PGUSER/PGPASSWORD values"
+                )
+            self._normalize_database_url(self.resolved_database_url)
+        elif _usable(self.database_url):
+            self._normalize_database_url(self.database_url)
+        if self.vector_store_provider == "pgvector" and (
+            self.pgvector_dimensions != 1024
+            or self.embedding_dimensions != self.pgvector_dimensions
+        ):
+            raise ValueError("pgvector requires a fixed 1024-dimensional embedding")
         return self
+
+    @property
+    def resolved_database_url(self) -> str:
+        configured = _usable(self.database_url)
+        if configured:
+            return self._normalize_database_url(configured)
+        username = quote(_usable(self.pguser), safe="")
+        password = quote(_usable(self.pgpassword), safe="")
+        host = self.pghost.strip()
+        database = quote(self.pgdatabase.strip(), safe="")
+        return (
+            f"postgresql+asyncpg://{username}:{password}@{host}:"
+            f"{self.pgport}/{database}"
+        )
+
+    @property
+    def resolved_psycopg_url(self) -> str:
+        return self.resolved_database_url.replace(
+            "postgresql+asyncpg://",
+            "postgresql://",
+            1,
+        )
+
+    @staticmethod
+    def _normalize_database_url(value: str) -> str:
+        normalized = value.strip()
+        if normalized.startswith("postgresql+asyncpg://"):
+            return normalized
+        if normalized.startswith("postgresql://"):
+            return normalized.replace(
+                "postgresql://",
+                "postgresql+asyncpg://",
+                1,
+            )
+        if normalized.startswith("postgres://"):
+            return normalized.replace(
+                "postgres://",
+                "postgresql+asyncpg://",
+                1,
+            )
+        raise ValueError("DATABASE_URL must use a PostgreSQL URL scheme")
 
     @property
     def resolved_embedding_api_key(self) -> str:

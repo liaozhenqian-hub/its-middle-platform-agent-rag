@@ -9,6 +9,9 @@ from uuid import uuid4
 
 import aiosqlite
 
+from knowledge.persistence.database import DatabaseResources
+from knowledge.persistence.sqlite_compat import PostgresCompatConnection
+
 from knowledge.memory.models import (
     Memory,
     MemoryCandidate,
@@ -1171,3 +1174,42 @@ class MemoryRepository:
             worker_id=row["worker_id"], error_type=row["error_type"],
             created_at=_parse(row["created_at"]), updated_at=_parse(row["updated_at"]),
         )
+
+
+class PostgresMemoryRepository(MemoryRepository):
+    def __init__(self, database_resources: DatabaseResources):
+        self.database_resources = database_resources
+
+    @asynccontextmanager
+    async def _connect(self):
+        async with PostgresCompatConnection(self.database_resources) as connection:
+            yield connection
+
+    async def initialize(self) -> None:
+        if not await self.database_resources.check_ready():
+            raise RuntimeError("PostgreSQL memory repository is unavailable")
+
+    async def claim_extraction_job(self, worker_id: str) -> MemoryExtractionJob | None:
+        now = _iso(_now())
+        async with self._connect() as db:
+            cursor = await db.execute(
+                """
+                WITH candidate AS (
+                    SELECT id FROM memory_extraction_jobs
+                    WHERE status='queued'
+                    ORDER BY created_at, id
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 1
+                )
+                UPDATE memory_extraction_jobs AS job
+                SET status='running', attempt=job.attempt+1,
+                    worker_id=?, updated_at=?
+                FROM candidate
+                WHERE job.id=candidate.id
+                RETURNING job.*
+                """,
+                (worker_id, now),
+            )
+            row = await cursor.fetchone()
+            await db.commit()
+        return self._extraction_job(row) if row is not None else None

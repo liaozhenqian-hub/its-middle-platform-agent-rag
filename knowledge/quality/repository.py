@@ -15,6 +15,9 @@ from uuid import uuid4
 
 import aiosqlite
 
+from knowledge.persistence.database import DatabaseResources
+from knowledge.persistence.sqlite_compat import PostgresCompatConnection
+
 from knowledge.quality.models import (
     CitationSnapshot,
     EvalCase,
@@ -1785,3 +1788,41 @@ class QualityRepository:
     @staticmethod
     def _now() -> str:
         return datetime.now(UTC).isoformat()
+
+
+class PostgresQualityRepository(QualityRepository):
+    def __init__(self, database_resources: DatabaseResources):
+        self.database_resources = database_resources
+
+    async def initialize(self) -> None:
+        if not await self.database_resources.check_ready():
+            raise RuntimeError("PostgreSQL quality repository is unavailable")
+
+    @asynccontextmanager
+    async def _connect(self):
+        async with PostgresCompatConnection(self.database_resources) as connection:
+            yield connection
+
+    async def claim_next_eval_run(self) -> EvalRun | None:
+        now = self._now()
+        async with self._connect() as database:
+            cursor = await database.execute(
+                """
+                WITH candidate AS (
+                    SELECT id FROM eval_runs
+                    WHERE status='queued'
+                    ORDER BY created_at, id
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 1
+                )
+                UPDATE eval_runs AS run
+                SET status='running', updated_at=?
+                FROM candidate
+                WHERE run.id=candidate.id
+                RETURNING run.*
+                """,
+                (now,),
+            )
+            row = await cursor.fetchone()
+            await database.commit()
+        return self._eval_run_from_row(row) if row is not None else None

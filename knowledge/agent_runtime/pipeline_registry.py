@@ -5,7 +5,7 @@ from threading import Lock
 from typing import Any
 
 from knowledge.config.settings import Settings
-from knowledge.repositories.vector_store_repository import VectorStoreRepository
+from knowledge.repositories.vector_store_factory import create_vector_store_repository
 from knowledge.services.hybrid_rerank_service import HybridRerankService
 from knowledge.services.keyword_retrieval_service import KeywordRetrievalService
 from knowledge.services.multi_route_retrieval_service import MultiRouteRetrievalService
@@ -21,7 +21,7 @@ class RetrievalPipelineRegistry:
     def __init__(
         self,
         settings: Settings | None = None,
-        repository: VectorStoreRepository | None = None,
+        repository: Any | None = None,
         pipeline_builder: Callable[[str, str | None], Any] | None = None,
     ):
         self.settings = settings
@@ -36,7 +36,7 @@ class RetrievalPipelineRegistry:
         if settings is None:
             raise ValueError("settings or pipeline_builder is required")
 
-        self.repository = repository or VectorStoreRepository.from_settings(settings)
+        self.repository = repository or create_vector_store_repository(settings)
         query_rewriter = create_query_rewriter(settings)
         self.query_rewriter = query_rewriter
         reranker = create_reranker(settings)
@@ -98,3 +98,8 @@ class RetrievalPipelineRegistry:
             for key in keys:
                 del self._pipelines[key]
             return len(keys)
+
+    def close(self) -> None:
+        close = getattr(self.repository, "close", None)
+        if callable(close):
+            close()

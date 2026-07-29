@@ -49,10 +49,11 @@ class DeepSeekSemanticJudge:
             {
                 "role": "system",
                 "content": (
-                    "你是企业知识问答质量裁判。只根据提供的脱敏证据评分，不调用工具，"
-                    "不补充外部知识。输出 JSON：score、relevance、factual_correctness、"
-                    "citation_support、unknown_calibration、actionability（0-100），"
-                    "facts_supported、critical_contradiction 和 reasons。"
+                    "你是企业知识问答质量裁判。只根据提供的脱敏证据评分，"
+                    "不得调用工具或补充外部知识。只返回一个 JSON 对象，不要使用 Markdown。"
+                    "字段必须为：score、relevance、factual_correctness、citation_support、"
+                    "unknown_calibration、actionability（均为 0-100 数字），"
+                    "facts_supported（布尔值）、critical_contradiction（布尔值）和 reasons（字符串数组）。"
                 ),
             },
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
@@ -64,7 +65,10 @@ class DeepSeekSemanticJudge:
                 attempt_messages.append(
                     {
                         "role": "user",
-                        "content": f"上次输出未通过 JSON 校验：{validation_error[:1000]}。只返回修复后的 JSON。",
+                        "content": (
+                            "上次输出未通过 JSON 校验："
+                            f"{validation_error[:1000]}。只返回修复后的 JSON。"
+                        ),
                     }
                 )
             response = await self.client.chat.completions.create(
@@ -75,7 +79,21 @@ class DeepSeekSemanticJudge:
             )
             raw = str(response.choices[0].message.content or "")
             try:
-                return SemanticJudgeResult.model_validate_json(raw).model_dump()
+                return SemanticJudgeResult.model_validate_json(
+                    self._extract_json(raw)
+                ).model_dump()
             except (ValidationError, ValueError, json.JSONDecodeError) as exc:
                 validation_error = str(exc)
         raise SemanticJudgeError("semantic judge returned invalid JSON twice")
+
+    @staticmethod
+    def _extract_json(raw: str) -> str:
+        normalized = raw.strip()
+        if normalized.startswith("```"):
+            normalized = normalized.removeprefix("```json").removeprefix("```")
+            normalized = normalized.removesuffix("```").strip()
+        start = normalized.find("{")
+        end = normalized.rfind("}")
+        if start >= 0 and end > start:
+            return normalized[start : end + 1]
+        return normalized
