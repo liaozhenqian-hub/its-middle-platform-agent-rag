@@ -28,6 +28,10 @@ _INTERNAL_MEMORY_LINE = re.compile(
     r"decision_memory|procedural_memory)\]"
     r")"
 )
+_INTERNAL_CURRENT_QUESTION_LINE = re.compile(
+    r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*|__)?当前问题"
+    r"(?:\*\*|__)?[ \t]*[：:][ \t]*(?:\r?\n)?"
+)
 _INTERNAL_MEMORY_MARKERS = (
     "历史会话摘要",
     "已确认的长期记忆",
@@ -168,6 +172,22 @@ def sanitize_public_answer(text: str | None, citations: Iterable[Any] = ()) -> s
         answer,
     )
     return answer
+
+
+def sanitize_public_user_message(text: str | None) -> str:
+    """Return only the original question from a memory-augmented session item."""
+    message = str(text or "").strip()
+    memory_match = _INTERNAL_MEMORY_LINE.search(message)
+    if memory_match is None:
+        return message
+    question_matches = [
+        match
+        for match in _INTERNAL_CURRENT_QUESTION_LINE.finditer(message)
+        if match.start() >= memory_match.start()
+    ]
+    if not question_matches:
+        return ""
+    return message[question_matches[-1].end() :].strip()
 
 
 class PublicAnswerStream:

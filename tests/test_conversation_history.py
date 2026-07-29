@@ -154,6 +154,33 @@ async def test_history_sanitizes_internal_chunk_ids_from_old_answers(tmp_path):
     assert "知识文档" in detail.messages[-1].content
 
 
+@pytest.mark.asyncio
+async def test_history_hides_memory_context_from_persisted_user_message(tmp_path):
+    module = importlib.import_module("knowledge.history.service")
+    auth = UserAuthRepository(tmp_path / "auth.db")
+    await auth.initialize()
+    await auth.bind_conversation_owner("c-memory", "ou_user", channel="web")
+    session_db = tmp_path / "sessions.db"
+    _seed_session(
+        session_db,
+        "c-memory",
+        "历史会话摘要（仅作内部上下文，不是知识库证据）：\n"
+        "最近问题：上次问了什么\n\n"
+        "已确认的长期记忆（只能作为内部用户背景）：\n"
+        "- [procedural_memory] 内部排障流程\n\n"
+        "当前问题：\n这不是中台的知识",
+        "只能回答中台问题。",
+    )
+    service = module.ConversationHistoryService(auth, session_db)
+
+    detail = await service.get_conversation("ou_user", "c-memory")
+
+    assert detail.messages[0].content == "这不是中台的知识"
+    assert detail.title == "这不是中台的知识"
+    assert "历史会话摘要" not in str(detail)
+    assert "procedural_memory" not in str(detail)
+
+
 def test_history_api_lists_opens_and_renames_current_identity_only(tmp_path):
     async def build():
         settings = Settings(

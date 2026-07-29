@@ -18,7 +18,10 @@ from knowledge.history.models import (
     ConversationHistoryPage,
     PublicConversationMessage,
 )
-from knowledge.agent_runtime.public_answer import sanitize_public_answer
+from knowledge.agent_runtime.public_answer import (
+    sanitize_public_answer,
+    sanitize_public_user_message,
+)
 
 
 class ConversationHistoryNotFound(LookupError):
@@ -192,8 +195,13 @@ def _public_message(row: aiosqlite.Row) -> PublicConversationMessage | None:
     content = _content_text(payload.get("content"))
     if not content:
         return None
-    if role == "assistant":
-        content = sanitize_public_answer(content)
+    content = (
+        sanitize_public_answer(content)
+        if role == "assistant"
+        else sanitize_public_user_message(content)
+    )
+    if not content:
+        return None
     return PublicConversationMessage(
         id=int(row["id"]),
         role=role,
