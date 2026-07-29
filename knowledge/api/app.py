@@ -1325,6 +1325,16 @@ def create_app(
 
         async def events():
             started_at = perf_counter()
+            yield _sse(
+                {
+                    "event": "run.started",
+                    "data": {
+                        "conversation_id": conversation_id,
+                        "run_id": run_id,
+                        "trace_id": None,
+                    },
+                }
+            )
             quality_turn = await _start_quality_turn(
                 request,
                 body,
@@ -1350,9 +1360,11 @@ def create_app(
                     ),
                 ):
                     data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                    if event["event"] == "run.started":
+                        continue
                     if event["event"] == "text.delta":
                         public_deltas.append(str(data.get("delta") or ""))
-                    if event["event"] in {"run.started", "run.completed", "approval.required"}:
+                    if event["event"] in {"run.completed", "approval.required"}:
                         data["quality_turn_id"] = getattr(quality_turn, "id", None)
                         data["feedback_token"] = getattr(quality_turn, "feedback_token", None)
                         event["data"] = data
@@ -1402,7 +1414,18 @@ def create_app(
                         answer="".join(public_deltas) or None,
                         error_type=type(exc).__name__,
                     )
-                raise
+                    yield _sse(
+                        {
+                            "event": "run.error",
+                            "data": {
+                                "conversation_id": conversation_id,
+                                "run_id": run_id,
+                                "error": "服务暂时不可用，请稍后重试。",
+                                "error_type": type(exc).__name__,
+                            },
+                        }
+                    )
+                return
 
         response = StreamingResponse(
             events(),

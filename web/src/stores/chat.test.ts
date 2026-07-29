@@ -303,4 +303,18 @@ describe("chat scope", () => {
     expect(observed).toContain("逐");
     expect(observed).toContain("逐字");
   });
+
+  it("replaces browser network errors with an actionable Chinese message", async () => {
+    mocks.stream.mockImplementation(async function* () {
+      throw new TypeError("network error");
+    });
+    const store = useChatStore();
+    store.selectScope({ knowledgeSpaceId: "middle-platform", domainId: null, label: "中台" });
+
+    await store.sendMessage("审批实例详情 operationSource 枚举值有哪些");
+
+    expect(store.error).toBe("网络连接已中断，请稍后重试。");
+    expect(store.messages[1].content).toBe("网络连接已中断，请稍后重试。");
+    expect(store.error).not.toContain("network error");
+  });
 });

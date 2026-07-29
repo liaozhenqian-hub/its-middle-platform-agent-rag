@@ -43,6 +43,14 @@ function persistConversationId(conversationId: string | null) {
   else localStorage.removeItem(ACTIVE_CONVERSATION_KEY);
 }
 
+function publicChatError(error: unknown): string {
+  const message = error instanceof Error ? error.message.trim() : "";
+  if (/network error|networkerror|failed to fetch|load failed/i.test(message)) {
+    return "网络连接已中断，请稍后重试。";
+  }
+  return message || "对话请求失败，请稍后重试。";
+}
+
 export const useChatStore = defineStore("chat", {
   state: () => ({
     spaces: [] as KnowledgeSpace[],
@@ -198,8 +206,8 @@ export const useChatStore = defineStore("chat", {
           }
         }
       } catch (error) {
-        this.error = error instanceof Error ? error.message : "对话请求失败";
-        if (!currentAssistant().content) currentAssistant().content = "本次请求未完成。";
+        this.error = publicChatError(error);
+        if (!currentAssistant().content) currentAssistant().content = this.error;
       } finally {
         this.streaming = false;
       }
