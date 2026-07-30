@@ -53,7 +53,7 @@ class ContractEvidenceProvider:
 
     async def _documents(self, domain_id: str, query: str) -> list[dict[str, Any]]:
         try:
-            pipeline = self.registry.get(self.app_id, None)
+            pipeline = await asyncio.to_thread(self.registry.get, self.app_id, None)
             result = await asyncio.to_thread(
                 pipeline.search,
                 query,

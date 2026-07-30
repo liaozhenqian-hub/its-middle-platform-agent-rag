@@ -76,7 +76,7 @@ def create_domain_rag_tool(
                 payload = {"status": "budget_exhausted", "max_calls": max_calls}
             return json.dumps(payload, ensure_ascii=False)
         try:
-            pipeline = registry.get(app_id, domain)
+            pipeline = await asyncio.to_thread(registry.get, app_id, domain)
             result = await asyncio.to_thread(
                 pipeline.search,
                 query,
@@ -171,7 +171,7 @@ def create_scoped_rag_tool(
                 payload = {"status": "budget_exhausted", "max_calls": max_calls}
             return json.dumps(payload, ensure_ascii=False)
         try:
-            pipeline = registry.get(app_id, None)
+            pipeline = await asyncio.to_thread(registry.get, app_id, None)
             clauses = list(base_clauses)
             if source_type == "code":
                 branch = _code_branch_for_message(ctx.context.current_user_message)
@@ -249,7 +249,7 @@ def create_domain_evidence_tool(
     async def search_modality(
         ctx: RunContextWrapper[AgentRunContext], query: str, source_type: str
     ) -> dict[str, Any]:
-        pipeline = registry.get(app_id, None)
+        pipeline = await asyncio.to_thread(registry.get, app_id, None)
         clauses: list[dict[str, Any]] = [
             {"$or": [{"domain_id": domain_id}, {"domain_id": "shared"}]},
             {"source_type": source_type},

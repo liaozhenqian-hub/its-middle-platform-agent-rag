@@ -1,4 +1,6 @@
+import asyncio
 import json
+import time
 
 import pytest
 from agents.tool_context import ToolContext
@@ -62,6 +64,12 @@ class FakeRegistry:
         return self.pipeline
 
 
+class SlowRegistry(FakeRegistry):
+    def get(self, app_id, domain):
+        time.sleep(0.2)
+        return super().get(app_id, domain)
+
+
 @pytest.mark.asyncio
 async def test_domain_rag_tool_has_fixed_scope_and_collects_private_citations():
     pipeline = FakePipeline()
@@ -102,6 +110,36 @@ async def test_domain_rag_tool_has_fixed_scope_and_collects_private_citations():
     assert context.citations[0].source_id == "chunk-1"
     assert "content" not in context.to_dict()["citations"][0]
     assert context.tool_runs[0].status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_construction_does_not_block_the_event_loop():
+    tool = create_domain_rag_tool(
+        registry=SlowRegistry(FakePipeline()),
+        tool_name="search_approval_flow_knowledge",
+        app_id="middle-platform",
+        domain="审批流",
+        agent_name="审批流专家",
+    )
+    context = AgentRunContext("conversation-slow-build", "run-slow-build")
+    tool_context = ToolContext(
+        context=context,
+        tool_name=tool.name,
+        tool_call_id="call-slow-build",
+        tool_arguments=json.dumps({"query": "审批接口"}, ensure_ascii=False),
+    )
+
+    started_at = time.perf_counter()
+    invocation = asyncio.create_task(
+        tool.on_invoke_tool(
+            tool_context,
+            json.dumps({"query": "审批接口"}, ensure_ascii=False),
+        )
+    )
+    await asyncio.sleep(0.01)
+
+    assert time.perf_counter() - started_at < 0.1
+    await invocation
 
 
 def test_domain_rag_tool_only_exposes_query_to_the_model():
