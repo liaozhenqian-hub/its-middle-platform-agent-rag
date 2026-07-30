@@ -319,3 +319,18 @@ Expected: `git diff --check` 无输出；只显示预期的计划勾选或验证
 git add docs/superpowers/plans/2026-07-30-bm25-pgvector-query-optimization.md
 git commit -m "docs: record bm25 optimization verification"
 ```
+
+## 实施验证记录（2026-07-30）
+
+- Task 1 至 Task 5 已按 RED → GREEN 顺序完成并分别提交。
+- 全量 `python -m pytest -q` 通过；条件性 live 测试按既有配置跳过，仅保留一条 FastAPI TestClient 依赖弃用警告。
+- 本地通过 Telepresence 连接 dev PostgreSQL/pgvector 的真实重放结果：
+  - BM25 冷构建：441.897 秒；该成本由启动预热承担，readiness 在完成前不导流。
+  - 首次查询：4.471 秒。
+  - 热查询：3.969 秒。
+  - Query Rewrite：1,172.5 毫秒。
+  - BM25：1,638.4 毫秒；较改造前 10.9 秒降低约 85%。
+  - pgvector：2,514.5 毫秒。
+  - Rerank：273.0 毫秒。
+  - 最终证据：5 条。
+- 热查询和证据收集低于 6 秒目标，总耗时低于 25 秒目标。BM25 比 1.5 秒目标高 138.4 毫秒，保留为 dev 同网络部署后的复测项，不将 Telepresence 网络开销误报为代码达标。
