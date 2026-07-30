@@ -8,6 +8,7 @@ from agents import SQLiteSession
 import psycopg
 from psycopg import sql
 import pytest
+from sqlalchemy.exc import DBAPIError
 
 from knowledge.agent_runtime.sessions import AgentSessionFactory, PostgresAgentSession
 from knowledge.config.settings import Settings
@@ -34,6 +35,57 @@ def test_postgres_agent_session_close_is_a_safe_noop():
     session = PostgresAgentSession("conversation-1", object())
 
     assert session.close() is None
+
+
+@pytest.mark.asyncio
+async def test_postgres_agent_session_retries_invalidated_history_read_once():
+    class Result:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return [{"role": "user", "content": "审批接口"}]
+
+    class Connection:
+        def __init__(self, fail):
+            self.fail = fail
+
+        async def execute(self, _statement):
+            if self.fail:
+                raise DBAPIError(
+                    "SELECT",
+                    {},
+                    RuntimeError("connection closed"),
+                    connection_invalidated=True,
+                )
+            return Result()
+
+    class ConnectionContext:
+        def __init__(self, engine):
+            self.engine = engine
+
+        async def __aenter__(self):
+            self.engine.connect_calls += 1
+            return Connection(fail=self.engine.connect_calls == 1)
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+    class Engine:
+        def __init__(self):
+            self.connect_calls = 0
+
+        def connect(self):
+            return ConnectionContext(self)
+
+    engine = Engine()
+    resources = type("Resources", (), {"engine": engine})()
+    session = PostgresAgentSession("conversation-retry", resources)
+
+    items = await session.get_items()
+
+    assert items == [{"role": "user", "content": "审批接口"}]
+    assert engine.connect_calls == 2
 
 
 def test_app_session_factory_uses_configured_relational_provider(tmp_path):

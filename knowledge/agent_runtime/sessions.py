@@ -4,6 +4,7 @@ from typing import Any
 from agents import SessionABC, SQLiteSession, SessionSettings
 from sqlalchemy import delete, func, insert, select
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.exc import DBAPIError
 
 from knowledge.persistence.database import DatabaseResources
 from knowledge.persistence.schema import agent_messages, agent_sessions
@@ -42,8 +43,14 @@ class PostgresAgentSession(SessionABC):
             )
         else:
             statement = statement.order_by(agent_messages.c.id.asc())
-        async with self.database_resources.engine.connect() as connection:
-            rows = (await connection.execute(statement)).scalars().all()
+        for attempt in range(2):
+            try:
+                async with self.database_resources.engine.connect() as connection:
+                    rows = (await connection.execute(statement)).scalars().all()
+                break
+            except DBAPIError as exc:
+                if attempt or not exc.connection_invalidated:
+                    raise
         items = [dict(item) for item in rows if isinstance(item, dict)]
         return list(reversed(items)) if reverse else items
 
