@@ -980,15 +980,26 @@ def create_app(
                 yield
         finally:
             try:
-                await cleanup.aclose()
+                tasks = list(application.state.quality_completion_tasks)
+                if tasks:
+                    _, pending = await asyncio.wait(tasks, timeout=10)
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                    application.state.quality_completion_tasks.difference_update(tasks)
             finally:
-                application.state._runtime_cleanup = None
+                try:
+                    await cleanup.aclose()
+                finally:
+                    application.state._runtime_cleanup = None
 
     application = FastAPI(
         title="Middle Platform Agent API",
         version="0.1.0",
         lifespan=guarded_lifespan,
     )
+    application.state.quality_completion_tasks = set()
     application.include_router(create_auth_router())
     application.include_router(create_account_router())
     if injected_service is not None:
@@ -1271,6 +1282,27 @@ def create_app(
                 type(exc).__name__,
             )
 
+    def _schedule_quality_completion(run_id: str, coroutine: Any) -> None:
+        async def run_completion() -> None:
+            try:
+                await coroutine
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Quality completion task failed run_id=%s error_type=%s",
+                    run_id,
+                    type(exc).__name__,
+                )
+
+        task = asyncio.create_task(
+            run_completion(),
+            name="quality-turn-completion",
+        )
+        tasks = application.state.quality_completion_tasks
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
     @application.post("/api/v1/agent/chat", response_model=AgentResponse)
     async def chat(body: ChatRequest, request: Request, response: Response):
         run_id = str(uuid4())
@@ -1401,49 +1433,63 @@ def create_app(
                         event["data"] = data
                     if event["event"] in {"run.completed", "approval.required"}:
                         terminal = True
-                        await _complete_quality_turn(
-                            request,
+                        quality_response = dict(data)
+                        _schedule_quality_completion(
                             run_id,
-                            status=str(data.get("status") or "completed"),
-                            duration_ms=(perf_counter() - started_at) * 1000,
-                            response=data,
+                            _complete_quality_turn(
+                                request,
+                                run_id,
+                                status=str(data.get("status") or "completed"),
+                                duration_ms=(perf_counter() - started_at) * 1000,
+                                response=quality_response,
+                            ),
                         )
                         data.pop("quality_spans", None)
                     elif event["event"] == "run.error":
                         terminal = True
-                        await _complete_quality_turn(
-                            request,
+                        _schedule_quality_completion(
                             run_id,
-                            status="error",
-                            duration_ms=(perf_counter() - started_at) * 1000,
-                            answer="".join(public_deltas) or None,
-                            error_type=str(
-                                data.get("error_type")
-                                or data.get("error")
-                                or "AgentRunError"
+                            _complete_quality_turn(
+                                request,
+                                run_id,
+                                status="error",
+                                duration_ms=(perf_counter() - started_at) * 1000,
+                                answer="".join(public_deltas) or None,
+                                error_type=str(
+                                    data.get("error_type")
+                                    or data.get("error")
+                                    or "AgentRunError"
+                                ),
                             ),
                         )
                     yield _sse(event)
             except asyncio.CancelledError:
                 if not terminal:
-                    await _complete_quality_turn(
-                        request,
+                    _schedule_quality_completion(
                         run_id,
-                        status="cancelled",
-                        duration_ms=(perf_counter() - started_at) * 1000,
-                        answer="".join(public_deltas) or None,
-                        error_type="CancelledError",
+                        _complete_quality_turn(
+                            request,
+                            run_id,
+                            status="cancelled",
+                            duration_ms=(perf_counter() - started_at) * 1000,
+                            answer="".join(public_deltas) or None,
+                            error_type="CancelledError",
+                        ),
                     )
                 raise
             except Exception as exc:
                 if not terminal:
-                    await _complete_quality_turn(
-                        request,
+                    terminal = True
+                    _schedule_quality_completion(
                         run_id,
-                        status="error",
-                        duration_ms=(perf_counter() - started_at) * 1000,
-                        answer="".join(public_deltas) or None,
-                        error_type=type(exc).__name__,
+                        _complete_quality_turn(
+                            request,
+                            run_id,
+                            status="error",
+                            duration_ms=(perf_counter() - started_at) * 1000,
+                            answer="".join(public_deltas) or None,
+                            error_type=type(exc).__name__,
+                        ),
                     )
                     yield _sse(
                         {

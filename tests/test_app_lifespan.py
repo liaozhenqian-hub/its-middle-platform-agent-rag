@@ -77,6 +77,23 @@ def test_manager_reasoning_synthesizer_is_only_built_for_enabled_deepseek():
     assert model_factory.calls == 1
 
 
+@pytest.mark.asyncio
+async def test_lifespan_waits_for_pending_quality_completion_tasks():
+    application = app_module.create_app(agent_service=object())
+    completed = asyncio.Event()
+
+    async def finish_quality_capture():
+        await asyncio.sleep(0.01)
+        completed.set()
+
+    async with application.router.lifespan_context(application):
+        task = asyncio.create_task(finish_quality_capture())
+        application.state.quality_completion_tasks.add(task)
+
+    assert completed.is_set()
+    assert not application.state.quality_completion_tasks
+
+
 @pytest.mark.parametrize(
     ("provider", "manager_enabled", "reasoning_enabled"),
     [

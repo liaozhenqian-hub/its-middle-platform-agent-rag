@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 
 import httpx
@@ -62,6 +63,18 @@ class FakeAgentService:
         yield {"event": "run.completed", "data": response(run_id).to_dict()}
 
 
+class BlockingQualityCapture(FakeQualityCapture):
+    def __init__(self):
+        super().__init__()
+        self.release = asyncio.Event()
+        self.completed = asyncio.Event()
+
+    async def complete(self, run_id: str, value: TurnCompletion):
+        await self.release.wait()
+        self.events.append((run_id, value))
+        self.completed.set()
+
+
 def test_json_chat_captures_before_agent_and_returns_feedback_metadata():
     capture = FakeQualityCapture()
     service = FakeAgentService(capture.events)
@@ -109,6 +122,32 @@ def test_sse_chat_captures_terminal_response_and_exposes_quality_metadata():
     assert '"feedback_token": "feedback-token"' in body
     assert [item[0] for item in capture.events] == ["start", "agent", capture.events[1][1]]
     assert capture.events[2][1].answer == "公开回答"
+
+
+@pytest.mark.asyncio
+async def test_stream_terminal_event_does_not_wait_for_quality_completion():
+    capture = BlockingQualityCapture()
+    app = create_app(
+        agent_service=FakeAgentService(capture.events),
+        quality_capture_service=capture,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response_task = asyncio.create_task(
+            client.post(
+                "/api/v1/agent/chat/stream",
+                json={
+                    "message": "审批接口",
+                    "conversation_id": "conv-fast-terminal",
+                },
+            )
+        )
+        response = await asyncio.wait_for(response_task, timeout=0.5)
+
+        assert "event: run.completed" in response.text
+        assert not capture.completed.is_set()
+        capture.release.set()
+        await asyncio.wait_for(capture.completed.wait(), timeout=1)
 
 
 class ErrorAgentService(FakeAgentService):
