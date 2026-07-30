@@ -186,6 +186,29 @@ def _start_registry_warmup(
     )
 
 
+def _bm25_component(
+    registry: Any,
+    *,
+    enabled: bool,
+) -> dict[str, Any]:
+    if not enabled:
+        return {"status": "disabled", "cached_pipelines": 0}
+    warm_status = getattr(registry, "warm_status", None)
+    if not callable(warm_status):
+        return {"status": "unavailable", "cached_pipelines": 0}
+    try:
+        details = dict(warm_status())
+    except Exception:
+        return {"status": "unavailable", "cached_pipelines": 0}
+    status = details.get("status")
+    if status not in {"warming", "available", "unavailable"}:
+        status = "unavailable"
+    return {
+        "status": status,
+        "cached_pipelines": max(int(details.get("cached_pipelines", 0)), 0),
+    }
+
+
 def _build_manager_reasoning_synthesizer(
     settings: Settings,
     model_factory: AgentModelFactory,
@@ -525,6 +548,7 @@ def create_app(
             )
             manager_reasoning_synthesizer = None
         registry = RetrievalPipelineRegistry(settings=settings)
+        application.state.retrieval_pipeline_registry = registry
         registry_close = getattr(registry, "close", None)
         if callable(registry_close):
             application.state._runtime_cleanup.callback(registry_close)
@@ -907,6 +931,10 @@ def create_app(
                 "count": vector_count,
                 "shadow_enabled": settings.vector_shadow_enabled,
             },
+            "bm25": _bm25_component(
+                registry,
+                enabled=settings.retrieval_warmup_enabled,
+            ),
             "postgres": {
                 "status": "available" if postgres_ready else (
                     "unavailable" if database_resources.enabled else "disabled"
@@ -960,12 +988,7 @@ def create_app(
         }
         application.state.registry_warmup_task = _start_registry_warmup(
             registry,
-            [
-                ("middle-platform", "指标平台"),
-                ("middle-platform", "审批流"),
-                ("middle-platform", "工作流"),
-                ("middle-platform", None),
-            ],
+            [("middle-platform", None)],
             enabled=settings.retrieval_warmup_enabled,
         )
         yield
@@ -2893,6 +2916,16 @@ def create_app(
             name: dict(details)
             for name, details in request.app.state.component_status.items()
         }
+        registry = getattr(
+            request.app.state,
+            "retrieval_pipeline_registry",
+            None,
+        )
+        if registry is not None and "bm25" in components:
+            components["bm25"] = _bm25_component(
+                registry,
+                enabled=components["bm25"].get("status") != "disabled",
+            )
         bridge = getattr(request.app.state, "feishu_bot_bridge", None)
         gateway = getattr(bridge, "gateway", None)
         connected = getattr(gateway, "connected", None)
@@ -2907,7 +2940,9 @@ def create_app(
         vector_component = (
             "vector_store" if "vector_store" in components else "chroma"
         )
-        critical = ("model", relational_component, vector_component)
+        critical = ["model", relational_component, vector_component]
+        if components.get("bm25", {}).get("status") != "disabled" and "bm25" in components:
+            critical.append("bm25")
         critical_ready = all(
             components.get(name, {}).get("status") == "available" for name in critical
         )

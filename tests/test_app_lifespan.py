@@ -46,6 +46,43 @@ async def test_registry_warmup_can_be_disabled_for_remote_vector_storage():
     assert task is None
 
 
+def test_bm25_component_uses_live_registry_status():
+    class Registry:
+        def warm_status(self):
+            return {"status": "available", "cached_pipelines": 1}
+
+    assert app_module._bm25_component(Registry(), enabled=True) == {
+        "status": "available",
+        "cached_pipelines": 1,
+    }
+
+
+def test_bm25_component_is_disabled_when_warmup_is_off():
+    assert app_module._bm25_component(object(), enabled=False) == {
+        "status": "disabled",
+        "cached_pipelines": 0,
+    }
+
+
+def test_readiness_is_degraded_while_bm25_is_warming():
+    application = app_module.create_app(
+        agent_service=object(),
+        component_status={
+            "model": {"status": "available"},
+            "database": {"status": "available"},
+            "vector_store": {"status": "available"},
+            "mcp": {"status": "available"},
+            "bm25": {"status": "warming", "cached_pipelines": 0},
+        },
+    )
+
+    ready = TestClient(application).get("/health/ready")
+
+    assert ready.status_code == 200
+    assert ready.json()["status"] == "degraded"
+    assert ready.json()["components"]["bm25"]["status"] == "warming"
+
+
 def test_manager_reasoning_synthesizer_is_only_built_for_enabled_deepseek():
     class FakeModelFactory:
         def __init__(self):
@@ -179,6 +216,9 @@ def test_production_lifespan_wires_catalog_scopes_and_swagger_provider(
         def warm(self, scopes):
             captured["warm_scopes"] = scopes
 
+        def warm_status(self):
+            return {"status": "available", "cached_pipelines": 1}
+
     class FakeMCP:
         def __init__(self, settings):
             self.available = False
@@ -263,6 +303,7 @@ def test_production_lifespan_wires_catalog_scopes_and_swagger_provider(
     assert captured["feishu_started"] is True
     assert captured["feishu_closed"] is True
     assert captured["feishu_db"] == tmp_path / "feishu.db"
+    assert captured["warm_scopes"] == [("middle-platform", None)]
 
 
 def test_production_lifespan_marks_incomplete_grafana_configuration_unavailable(
