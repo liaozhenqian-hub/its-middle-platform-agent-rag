@@ -63,12 +63,14 @@ class RetrievalPipelineRegistry:
                 domain=domain,
                 title_weight=settings.bm25_title_weight,
                 keywords_weight=settings.bm25_keywords_weight,
+                memory_filter_enabled=settings.bm25_memory_filter_enabled,
             )
             return MultiRouteRetrievalService(
                 self.repository,
                 keyword_service,
                 query_rewriter=query_rewriter,
                 hybrid_ranker=HybridRerankService(reranker=reranker),
+                parallel_routes_enabled=settings.retrieval_parallel_routes_enabled,
             )
 
         self._pipeline_builder = build

@@ -161,3 +161,36 @@ def test_pipeline_registry_closes_repository_resource():
     registry.close()
 
     assert repository.closed is True
+
+
+def test_pipeline_registry_injects_retrieval_performance_switches(monkeypatch):
+    captured = {}
+
+    class KeywordService:
+        def __init__(self, repository, **kwargs):
+            captured["keyword"] = kwargs
+
+    class MultiRouteService:
+        def __init__(self, repository, keyword_service, **kwargs):
+            captured["multi_route"] = kwargs
+
+    monkeypatch.setattr(registry_module, "KeywordRetrievalService", KeywordService)
+    monkeypatch.setattr(registry_module, "MultiRouteRetrievalService", MultiRouteService)
+    monkeypatch.setattr(
+        registry_module,
+        "create_vector_store_repository",
+        lambda _settings: object(),
+    )
+    settings = Settings(
+        _env_file=None,
+        QUERY_REWRITE_ENABLED=False,
+        RERANK_ENABLED=False,
+        BM25_MEMORY_FILTER_ENABLED=False,
+        RETRIEVAL_PARALLEL_ROUTES_ENABLED=False,
+    )
+
+    registry = RetrievalPipelineRegistry(settings=settings)
+    registry.get("middle-platform", None)
+
+    assert captured["keyword"]["memory_filter_enabled"] is False
+    assert captured["multi_route"]["parallel_routes_enabled"] is False
