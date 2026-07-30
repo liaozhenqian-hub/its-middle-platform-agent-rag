@@ -113,8 +113,9 @@ class PostgresVectorStoreRepository:
         resolved = settings or get_settings()
         pool = ConnectionPool(
             conninfo=resolved.resolved_psycopg_url,
-            min_size=1,
+            min_size=0,
             max_size=resolved.database_pool_size + resolved.database_max_overflow,
+            max_idle=5.0,
             timeout=resolved.database_pool_timeout_seconds,
             kwargs={"autocommit": False},
             configure=register_vector,

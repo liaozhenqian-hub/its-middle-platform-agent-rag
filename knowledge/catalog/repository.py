@@ -159,6 +159,57 @@ class CatalogRepository:
             for row in rows
         ]
 
+    async def list_spaces_with_domains(
+        self,
+    ) -> list[tuple[KnowledgeSpace, list[KnowledgeDomain]]]:
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT
+                        s.id AS space_id,
+                        s.name AS space_name,
+                        s.created_at AS space_created_at,
+                        d.id AS domain_id,
+                        d.name AS domain_name,
+                        d.sort_order AS domain_sort_order,
+                        d.created_at AS domain_created_at
+                    FROM knowledge_spaces AS s
+                    LEFT JOIN knowledge_domains AS d ON d.space_id=s.id
+                    ORDER BY s.name, d.sort_order, d.id
+                    """
+                )
+            ).fetchall()
+        result: list[tuple[KnowledgeSpace, list[KnowledgeDomain]]] = []
+        by_space: dict[str, list[KnowledgeDomain]] = {}
+        for row in rows:
+            space_id = row["space_id"]
+            domains = by_space.get(space_id)
+            if domains is None:
+                domains = []
+                by_space[space_id] = domains
+                result.append(
+                    (
+                        KnowledgeSpace(
+                            id=space_id,
+                            name=row["space_name"],
+                            created_at=_from_iso(row["space_created_at"]),
+                        ),
+                        domains,
+                    )
+                )
+            if row["domain_id"] is not None:
+                domains.append(
+                    KnowledgeDomain(
+                        id=row["domain_id"],
+                        space_id=space_id,
+                        name=row["domain_name"],
+                        sort_order=int(row["domain_sort_order"]),
+                        created_at=_from_iso(row["domain_created_at"]),
+                    )
+                )
+        return result
+
     async def list_domains(self, space_id: str) -> list[KnowledgeDomain]:
         async with self._connect() as db:
             rows = await (

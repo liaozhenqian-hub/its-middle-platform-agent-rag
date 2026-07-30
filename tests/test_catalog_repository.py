@@ -43,6 +43,14 @@ async def test_initialize_is_idempotent_enables_sqlite_guards_and_seeds_catalog(
         ("workflow", "工作流"),
     ]
 
+    catalog = await repository.list_spaces_with_domains()
+    assert [
+        (space.id, [domain.id for domain in space_domains])
+        for space, space_domains in catalog
+    ] == [
+        ("middle-platform", ["metric-platform", "approval-flow", "workflow"])
+    ]
+
     # Foreign keys are enabled on every repository connection, not just migrations.
     with pytest.raises(aiosqlite.IntegrityError):
         await repository.create_source(

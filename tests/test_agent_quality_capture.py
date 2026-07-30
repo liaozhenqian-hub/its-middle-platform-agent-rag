@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from knowledge.agent_runtime.service import AgentRunResponse
@@ -102,6 +104,7 @@ def test_sse_chat_captures_terminal_response_and_exposes_quality_metadata():
         body = "".join(result.iter_text())
 
     assert result.status_code == 200
+    assert body.count("event: run.started") == 1
     assert '"quality_turn_id": "turn-1"' in body
     assert '"feedback_token": "feedback-token"' in body
     assert [item[0] for item in capture.events] == ["start", "agent", capture.events[1][1]]
@@ -145,3 +148,38 @@ def test_json_and_sse_failures_are_captured_without_storing_exception_message():
         list(stream.iter_text())
     assert capture.events[-1][1].status == "error"
     assert capture.events[-1][1].error_type == "TimeoutError"
+
+
+class PreStreamDatabaseFailureService(FakeAgentService):
+    async def stream_chat(self, message, conversation_id=None, *, run_id=None, **kwargs):
+        if False:  # pragma: no cover - keep this method an async generator
+            yield None
+        raise OperationalError("private database connection details")
+
+
+class OperationalError(RuntimeError):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_sse_converts_pre_stream_database_failure_to_public_terminal_event():
+    capture = FakeQualityCapture()
+    app = create_app(
+        agent_service=PreStreamDatabaseFailureService(capture.events),
+        quality_capture_service=capture,
+    )
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        stream = await client.post(
+            "/api/v1/agent/chat/stream",
+            json={"message": "审批实例详情 operationSource 枚举值有哪些"},
+        )
+    body = stream.text
+
+    assert stream.status_code == 200
+    assert body.count("event: run.started") == 1
+    assert body.count("event: run.error") == 1
+    assert "服务暂时不可用，请稍后重试。" in body
+    assert "private database connection details" not in body
+    assert capture.events[-1][1].status == "error"
+    assert capture.events[-1][1].error_type == "OperationalError"

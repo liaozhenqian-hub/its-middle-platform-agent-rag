@@ -2,6 +2,7 @@ import importlib
 import asyncio
 import json
 import sqlite3
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -109,6 +110,35 @@ async def test_history_lists_searches_and_returns_only_public_messages(tmp_path)
         ("assistant", "接口是 /transfer。"),
     ]
     assert "private tool output" not in str(detail)
+
+
+@pytest.mark.asyncio
+async def test_history_list_batches_session_queries_for_multiple_conversations(tmp_path):
+    module = importlib.import_module("knowledge.history.service")
+    auth = UserAuthRepository(tmp_path / "auth.db")
+    await auth.initialize()
+    session_db = tmp_path / "sessions.db"
+    for index in range(3):
+        conversation_id = f"c-{index}"
+        await auth.bind_conversation_owner(conversation_id, "ou_user", channel="web")
+        _seed_session(session_db, conversation_id, f"问题 {index}", f"回答 {index}")
+    service = module.ConversationHistoryService(auth, session_db)
+    original_connect = service._connect
+    connect_count = 0
+
+    @asynccontextmanager
+    async def counted_connect():
+        nonlocal connect_count
+        connect_count += 1
+        async with original_connect() as connection:
+            yield connection
+
+    service._connect = counted_connect
+
+    page = await service.list_conversations("ou_user", page=1, page_size=20)
+
+    assert page.total == 3
+    assert connect_count == 1
 
 
 @pytest.mark.asyncio

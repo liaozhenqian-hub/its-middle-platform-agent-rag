@@ -24,3 +24,5 @@ storage/backups/
 storage/git/
 storage/uploads/
 logs/
+!knowledge/logs/
+!knowledge/logs/*.py

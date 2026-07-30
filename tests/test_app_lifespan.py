@@ -1,4 +1,6 @@
 import base64
+import asyncio
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -6,6 +8,42 @@ from fastapi.testclient import TestClient
 
 import knowledge.api.app as app_module
 from knowledge.config.settings import Settings
+
+
+@pytest.mark.asyncio
+async def test_registry_warmup_runs_without_blocking_application_startup():
+    started = Event()
+    release = Event()
+
+    class SlowRegistry:
+        def warm(self, _scopes):
+            started.set()
+            release.wait(timeout=2)
+
+    task = app_module._start_registry_warmup(
+        SlowRegistry(),
+        [("middle-platform", None)],
+    )
+
+    assert await asyncio.to_thread(started.wait, 0.5)
+    assert not task.done()
+    release.set()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_registry_warmup_can_be_disabled_for_remote_vector_storage():
+    class Registry:
+        def warm(self, _scopes):
+            raise AssertionError("disabled warmup must not run")
+
+    task = app_module._start_registry_warmup(
+        Registry(),
+        [("middle-platform", None)],
+        enabled=False,
+    )
+
+    assert task is None
 
 
 def test_manager_reasoning_synthesizer_is_only_built_for_enabled_deepseek():

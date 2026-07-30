@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 import re
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -12,6 +12,15 @@ VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 VALID_AGENT_PROVIDERS = {"openai", "deepseek"}
 VALID_DATA_STORE_PROVIDERS = {"sqlite", "postgres"}
 VALID_VECTOR_STORE_PROVIDERS = {"chroma", "pgvector"}
+VALID_DATABASE_SSL_MODES = {
+    "disable",
+    "allow",
+    "prefer",
+    "require",
+    "verify-ca",
+    "verify-full",
+}
+VALID_BUG_GRAPH_CHECKPOINT_PROVIDERS = {"auto", "sqlite", "postgres"}
 POSTGRES_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -63,6 +72,10 @@ class Settings(BaseSettings):
     keyword_candidate_k: int = Field(default=20, ge=1, alias="KEYWORD_CANDIDATE_K")
     vector_candidate_k: int = Field(default=20, ge=1, alias="VECTOR_CANDIDATE_K")
     final_result_k: int = Field(default=5, ge=1, alias="FINAL_RESULT_K")
+    retrieval_warmup_enabled: bool = Field(
+        default=True,
+        alias="RETRIEVAL_WARMUP_ENABLED",
+    )
 
     legacy_openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     legacy_openai_base_url: str = Field(default="", alias="OPENAI_BASE_URL")
@@ -91,6 +104,7 @@ class Settings(BaseSettings):
     pguser: str = Field(default="", alias="PGUSER")
     pgpassword: str = Field(default="", alias="PGPASSWORD", repr=False)
     database_schema: str = Field(default="public", alias="DATABASE_SCHEMA")
+    database_ssl_mode: str = Field(default="prefer", alias="DATABASE_SSL_MODE")
     database_pool_size: int = Field(
         default=5,
         ge=1,
@@ -108,6 +122,12 @@ class Settings(BaseSettings):
         gt=0,
         le=300,
         alias="DATABASE_POOL_TIMEOUT_SECONDS",
+    )
+    database_pool_recycle_seconds: int = Field(
+        default=1800,
+        gt=0,
+        le=86400,
+        alias="DATABASE_POOL_RECYCLE_SECONDS",
     )
     database_statement_timeout_seconds: int = Field(
         default=30,
@@ -521,6 +541,10 @@ class Settings(BaseSettings):
     )
 
     bug_graph_enabled: bool = Field(default=True, alias="BUG_GRAPH_ENABLED")
+    bug_graph_checkpoint_provider: str = Field(
+        default="auto",
+        alias="BUG_GRAPH_CHECKPOINT_PROVIDER",
+    )
     bug_graph_db: Path = Field(
         default=Path("storage/bug_graph.db"),
         alias="BUG_GRAPH_DB",
@@ -649,6 +673,26 @@ class Settings(BaseSettings):
             raise ValueError(f"DATA_STORE_PROVIDER must be one of: {allowed}")
         return normalized
 
+    @field_validator("database_ssl_mode", mode="before")
+    @classmethod
+    def normalize_database_ssl_mode(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        if normalized not in VALID_DATABASE_SSL_MODES:
+            allowed = ", ".join(sorted(VALID_DATABASE_SSL_MODES))
+            raise ValueError(f"DATABASE_SSL_MODE must be one of: {allowed}")
+        return normalized
+
+    @field_validator("bug_graph_checkpoint_provider", mode="before")
+    @classmethod
+    def normalize_bug_graph_checkpoint_provider(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        if normalized not in VALID_BUG_GRAPH_CHECKPOINT_PROVIDERS:
+            allowed = ", ".join(sorted(VALID_BUG_GRAPH_CHECKPOINT_PROVIDERS))
+            raise ValueError(
+                f"BUG_GRAPH_CHECKPOINT_PROVIDER must be one of: {allowed}"
+            )
+        return normalized
+
     @field_validator("vector_store_provider", mode="before")
     @classmethod
     def normalize_vector_store_provider(cls, value: str) -> str:
@@ -749,10 +793,18 @@ class Settings(BaseSettings):
 
     @property
     def resolved_psycopg_url(self) -> str:
-        return self.resolved_database_url.replace(
+        url = self.resolved_database_url.replace(
             "postgresql+asyncpg://",
             "postgresql://",
             1,
+        )
+        if self.database_ssl_mode == "prefer":
+            return url
+        parsed = urlsplit(url)
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        query["sslmode"] = self.database_ssl_mode
+        return urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment)
         )
 
     @staticmethod

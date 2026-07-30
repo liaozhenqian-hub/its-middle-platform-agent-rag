@@ -57,9 +57,10 @@ class ConversationHistoryService:
             raise ValueError("invalid conversation history pagination")
         normalized_query = " ".join(query.split()).casefold()
         owners = await self.auth_repository.list_conversations_for_owner(owner_id)
+        details = await self._read_details(owners)
         items: list[ConversationHistoryItem] = []
         for owner in owners:
-            detail = await self._read_detail(owner)
+            detail = details.get(owner.conversation_id)
             if detail is None or not detail.messages:
                 continue
             preview = _preview(detail.messages[-1].content, 140)
@@ -125,51 +126,71 @@ class ConversationHistoryService:
         return owner
 
     async def _read_detail(self, owner) -> ConversationHistoryDetail | None:
+        return (await self._read_details([owner])).get(owner.conversation_id)
+
+    async def _read_details(self, owners) -> dict[str, ConversationHistoryDetail]:
+        if not owners:
+            return {}
+        conversation_ids = [owner.conversation_id for owner in owners]
+        placeholders = ",".join("?" for _ in conversation_ids)
         async with self._connect() as database:
-            session = await (
+            session_rows = await (
                 await database.execute(
-                    "SELECT created_at,updated_at FROM agent_sessions WHERE session_id=?",
-                    (owner.conversation_id,),
-                )
-            ).fetchone()
-            if session is None:
-                return None
-            rows = await (
-                await database.execute(
-                    """
-                    SELECT id,message_data,created_at FROM agent_messages
-                    WHERE session_id=? ORDER BY id ASC
-                    """,
-                    (owner.conversation_id,),
+                    f"SELECT session_id,created_at,updated_at FROM agent_sessions "
+                    f"WHERE session_id IN ({placeholders})",
+                    tuple(conversation_ids),
                 )
             ).fetchall()
-            scope = await (
+            message_rows = await (
                 await database.execute(
-                    """
-                    SELECT knowledge_space_id,domain_id
-                    FROM agent_conversation_scopes WHERE conversation_id=?
+                    f"""
+                    SELECT id,session_id,message_data,created_at FROM agent_messages
+                    WHERE session_id IN ({placeholders}) ORDER BY id ASC
                     """,
-                    (owner.conversation_id,),
+                    tuple(conversation_ids),
                 )
-            ).fetchone()
-        messages = tuple(
-            message
-            for row in rows
-            if (message := _public_message(row)) is not None
-        )
-        first_question = next(
-            (item.content for item in messages if item.role == "user"), ""
-        )
-        return ConversationHistoryDetail(
-            conversation_id=owner.conversation_id,
-            title=owner.title or _preview(first_question, 60) or "新对话",
-            channel=owner.channel,
-            knowledge_space_id=scope["knowledge_space_id"] if scope else None,
-            domain_id=scope["domain_id"] if scope else None,
-            created_at=_parse_datetime(session["created_at"]),
-            updated_at=_parse_datetime(session["updated_at"]),
-            messages=messages,
-        )
+            ).fetchall()
+            scope_rows = await (
+                await database.execute(
+                    f"""
+                    SELECT conversation_id,knowledge_space_id,domain_id
+                    FROM agent_conversation_scopes
+                    WHERE conversation_id IN ({placeholders})
+                    """,
+                    tuple(conversation_ids),
+                )
+            ).fetchall()
+        sessions = {row["session_id"]: row for row in session_rows}
+        scopes = {row["conversation_id"]: row for row in scope_rows}
+        messages_by_conversation: dict[str, list[PublicConversationMessage]] = {
+            conversation_id: [] for conversation_id in conversation_ids
+        }
+        for row in message_rows:
+            message = _public_message(row)
+            if message is not None:
+                messages_by_conversation.setdefault(row["session_id"], []).append(message)
+        details: dict[str, ConversationHistoryDetail] = {}
+        for owner in owners:
+            conversation_id = owner.conversation_id
+            session = sessions.get(conversation_id)
+            if session is None:
+                continue
+            messages = tuple(messages_by_conversation.get(conversation_id, ()))
+            first_question = next(
+                (item.content for item in messages if item.role == "user"), ""
+            )
+            scope = scopes.get(conversation_id)
+            details[conversation_id] = ConversationHistoryDetail(
+                conversation_id=conversation_id,
+                title=owner.title or _preview(first_question, 60) or "新对话",
+                channel=owner.channel,
+                knowledge_space_id=scope["knowledge_space_id"] if scope else None,
+                domain_id=scope["domain_id"] if scope else None,
+                created_at=_parse_datetime(session["created_at"]),
+                updated_at=_parse_datetime(session["updated_at"]),
+                messages=messages,
+            )
+        return details
 
 
 class PostgresConversationHistoryService(ConversationHistoryService):
