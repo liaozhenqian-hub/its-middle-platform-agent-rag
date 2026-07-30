@@ -33,6 +33,8 @@ class RetrievalPipelineRegistry:
         self.repository = repository
         self.query_rewriter = None
         self._pipelines: dict[tuple[str, str], Any] = {}
+        self._build_locks: dict[tuple[str, str], Lock] = {}
+        self._invalidation_generation = 0
         self._lock = Lock()
         self._warm_state = "warming"
         self.stale_while_refresh_enabled = (
@@ -81,12 +83,33 @@ class RetrievalPipelineRegistry:
         if not normalized_app_id:
             raise ValueError("app_id is required")
         key = (normalized_app_id, normalized_domain or "")
-        with self._lock:
-            pipeline = self._pipelines.get(key)
-            if pipeline is None:
-                pipeline = self._pipeline_builder(normalized_app_id, normalized_domain)
-                self._pipelines[key] = pipeline
-            return pipeline
+        while True:
+            with self._lock:
+                pipeline = self._pipelines.get(key)
+                if pipeline is not None:
+                    return pipeline
+                build_lock = self._build_locks.setdefault(key, Lock())
+
+            with build_lock:
+                with self._lock:
+                    pipeline = self._pipelines.get(key)
+                    if pipeline is not None:
+                        return pipeline
+                    generation = self._invalidation_generation
+
+                pipeline = self._pipeline_builder(
+                    normalized_app_id,
+                    normalized_domain,
+                )
+
+                with self._lock:
+                    existing = self._pipelines.get(key)
+                    if existing is not None:
+                        return existing
+                    if generation != self._invalidation_generation:
+                        continue
+                    self._pipelines[key] = pipeline
+                    return pipeline
 
     def warm(self, scopes: list[tuple[str, str]]) -> None:
         with self._lock:
@@ -166,6 +189,7 @@ class RetrievalPipelineRegistry:
         normalized_app_id = app_id.strip() if app_id and app_id.strip() else None
         normalized_domain = domain.strip() if domain and domain.strip() else None
         with self._lock:
+            self._invalidation_generation += 1
             if normalized_app_id is None:
                 removed = len(self._pipelines)
                 self._pipelines.clear()

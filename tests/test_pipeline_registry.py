@@ -122,6 +122,72 @@ def test_warm_status_tracks_successful_warmup():
     }
 
 
+def test_warm_status_remains_readable_during_initial_pipeline_build():
+    build_started = Event()
+    release_build = Event()
+    status_read = Event()
+    observed = {}
+
+    def build(_app_id, _domain):
+        build_started.set()
+        release_build.wait(timeout=1)
+        return object()
+
+    registry = RetrievalPipelineRegistry(pipeline_builder=build)
+    warm_thread = Thread(
+        target=lambda: registry.warm([("middle-platform", None)]),
+        daemon=True,
+    )
+
+    def read_status():
+        observed.update(registry.warm_status())
+        status_read.set()
+
+    status_thread = Thread(target=read_status, daemon=True)
+    warm_thread.start()
+    assert build_started.wait(timeout=0.5)
+    status_thread.start()
+    readable_while_building = status_read.wait(timeout=0.2)
+    release_build.set()
+    warm_thread.join(timeout=1)
+    status_thread.join(timeout=1)
+
+    assert readable_while_building is True
+    assert observed == {"status": "warming", "cached_pipelines": 0}
+
+
+def test_concurrent_initial_get_builds_each_scope_once():
+    build_started = Event()
+    release_build = Event()
+    calls = []
+    results = []
+
+    def build(app_id, domain):
+        calls.append((app_id, domain))
+        build_started.set()
+        release_build.wait(timeout=1)
+        return object()
+
+    registry = RetrievalPipelineRegistry(pipeline_builder=build)
+    threads = [
+        Thread(
+            target=lambda: results.append(registry.get("middle-platform", None)),
+            daemon=True,
+        )
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    assert build_started.wait(timeout=0.5)
+    release_build.set()
+    for thread in threads:
+        thread.join(timeout=1)
+
+    assert calls == [("middle-platform", None)]
+    assert len(results) == 2
+    assert results[0] is results[1]
+
+
 def test_pipeline_registry_uses_the_configured_vector_provider_factory(monkeypatch):
     repository = object()
     calls = []
