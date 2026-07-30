@@ -57,7 +57,7 @@ def test_embedding_dimension_is_validated_before_database_access():
         repository.upsert_with_embeddings([chunk("a", "A")], [[0.1, 0.2]])
 
 
-def test_pgvector_pool_does_not_keep_an_idle_connection(monkeypatch):
+def test_pgvector_pool_keeps_warmed_connections_for_configured_idle_window(monkeypatch):
     captured = {}
 
     class Pool:
@@ -74,13 +74,14 @@ def test_pgvector_pool_does_not_keep_an_idle_connection(monkeypatch):
         DATABASE_URL="postgresql://agent:secret@db.internal/middle_agent",
         DATABASE_POOL_SIZE=1,
         DATABASE_MAX_OVERFLOW=0,
+        PGVECTOR_POOL_MAX_IDLE_SECONDS=300,
     )
 
     PostgresVectorStoreRepository.from_settings(settings, embedding=None)
 
     assert captured["min_size"] == 0
     assert captured["max_size"] == 1
-    assert captured["max_idle"] == 5.0
+    assert captured["max_idle"] == 300.0
 
 
 def test_vector_upsert_uses_copy_staging_without_embedding_api_calls():

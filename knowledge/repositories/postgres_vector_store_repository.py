@@ -115,7 +115,7 @@ class PostgresVectorStoreRepository:
             conninfo=resolved.resolved_psycopg_url,
             min_size=0,
             max_size=resolved.database_pool_size + resolved.database_max_overflow,
-            max_idle=5.0,
+            max_idle=resolved.pgvector_pool_max_idle_seconds,
             timeout=resolved.database_pool_timeout_seconds,
             kwargs={"autocommit": False},
             configure=register_vector,

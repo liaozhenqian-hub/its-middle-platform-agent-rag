@@ -283,14 +283,23 @@ def create_domain_evidence_tool(
                 if len(referenced_types) >= 2:
                     break
             if referenced_types:
-                for identifier in referenced_types:
-                    exact_type_chunks.extend(
-                        await asyncio.to_thread(
-                            registry.repository.get_chunks,
-                            {"$and": [*clauses, {"symbol_name": identifier}]},
-                            None,
-                        )
+                exact_type_chunks.extend(
+                    await asyncio.to_thread(
+                        registry.repository.get_chunks,
+                        {
+                            "$and": [
+                                *clauses,
+                                {
+                                    "$or": [
+                                        {"symbol_name": identifier}
+                                        for identifier in referenced_types
+                                    ]
+                                },
+                            ]
+                        },
+                        None,
                     )
+                )
                 if not exact_type_chunks:
                     supplemental = await asyncio.to_thread(
                         pipeline.search,

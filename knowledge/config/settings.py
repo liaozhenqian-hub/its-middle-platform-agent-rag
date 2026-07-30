@@ -141,6 +141,12 @@ class Settings(BaseSettings):
         le=86400,
         alias="DATABASE_POOL_RECYCLE_SECONDS",
     )
+    pgvector_pool_max_idle_seconds: float = Field(
+        default=300.0,
+        gt=0,
+        le=86400,
+        alias="PGVECTOR_POOL_MAX_IDLE_SECONDS",
+    )
     database_statement_timeout_seconds: int = Field(
         default=30,
         gt=0,

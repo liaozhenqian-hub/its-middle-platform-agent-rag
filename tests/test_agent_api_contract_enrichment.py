@@ -45,13 +45,21 @@ class Registry:
     def __init__(self, pipeline):
         self.pipeline = pipeline
         self.repository = self
+        self.chunk_queries = []
 
     def get(self, app_id, domain_id):
         return self.pipeline
 
     def get_chunks(self, where, ids=None):
+        self.chunk_queries.append(where)
         clauses = where.get("$and", [])
-        if {"symbol_name": "MetricReqVO"} not in clauses:
+        symbol_clause = clauses[-1] if clauses else None
+        if symbol_clause != {
+            "$or": [
+                {"symbol_name": "CubeLoadV2RespVO"},
+                {"symbol_name": "MetricReqVO"},
+            ]
+        }:
             return []
         return [
             KnowledgeChunk(
@@ -70,8 +78,9 @@ class Registry:
 @pytest.mark.asyncio
 async def test_api_contract_enriches_referenced_request_type_fields():
     pipeline = ApiPipeline()
+    registry = Registry(pipeline)
     tool = create_domain_evidence_tool(
-        registry=Registry(pipeline),
+        registry=registry,
         inspector=None,
         source_provider=None,
         app_id="middle-platform",
@@ -100,5 +109,12 @@ async def test_api_contract_enriches_referenced_request_type_fields():
     )
 
     code_results = payload["evidence"][0]["results"]
+    assert len(registry.chunk_queries) == 1
+    assert registry.chunk_queries[0]["$and"][-1] == {
+        "$or": [
+            {"symbol_name": "CubeLoadV2RespVO"},
+            {"symbol_name": "MetricReqVO"},
+        ]
+    }
     assert [item["chunk_id"] for item in code_results] == ["request-fields", "method"]
     assert pipeline.queries == [pipeline.queries[0]]
