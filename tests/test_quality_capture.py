@@ -5,8 +5,54 @@ import pytest
 import aiosqlite
 
 from knowledge.quality import (
-    QualityCaptureService, QualityRepository, TurnCompletion, TurnStart,
+    QualityCaptureService,
+    QualityRepository,
+    ToolRunSnapshot,
+    TurnCompletion,
+    TurnStart,
 )
+
+
+class CountingQualityRepository(QualityRepository):
+    def __init__(self, path):
+        super().__init__(path)
+        self.batch_calls = 0
+
+    async def record_spans(self, values):
+        self.batch_calls += 1
+        return await super().record_spans(values)
+
+
+@pytest.mark.asyncio
+async def test_quality_capture_records_completion_spans_in_one_batch(tmp_path):
+    repository = CountingQualityRepository(tmp_path / "quality-batch.db")
+    await repository.initialize()
+    capture = QualityCaptureService(repository)
+    turn = await capture.start(
+        TurnStart(
+            run_id="run-batch-capture", channel="codex", question="审批接口"
+        )
+    )
+
+    await capture.complete(
+        turn.run_id,
+        TurnCompletion(
+            status="completed",
+            last_agent="审批流专家",
+            duration_ms=100,
+            tools=[
+                ToolRunSnapshot(
+                    tool_call_id="one",
+                    tool_name="collect_domain_evidence",
+                    agent_name="审批流专家",
+                    status="completed",
+                    duration_ms=20,
+                )
+            ],
+        ),
+    )
+
+    assert repository.batch_calls == 1
 
 
 @pytest.mark.asyncio
