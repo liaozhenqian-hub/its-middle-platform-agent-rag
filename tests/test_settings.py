@@ -109,6 +109,7 @@ def test_settings_exposes_query_rewrite_and_rerank_defaults():
     assert settings.keyword_candidate_k == 20
     assert settings.vector_candidate_k == 20
     assert settings.final_result_k == 5
+    assert settings.retrieval_warmup_enabled is True
 
 
 def test_settings_exposes_logging_defaults():
@@ -174,6 +175,7 @@ def test_settings_exposes_bug_graph_and_citation_detail_defaults():
     settings = Settings(_env_file=None)
 
     assert settings.bug_graph_enabled is True
+    assert settings.bug_graph_checkpoint_provider == "auto"
     assert settings.resolved_bug_graph_db == PROJECT_ROOT / "storage/bug_graph.db"
     assert settings.bug_graph_interrupt_ttl_seconds == 86400
     assert settings.bug_graph_log_retry_count == 2

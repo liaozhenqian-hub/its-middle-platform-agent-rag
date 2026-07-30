@@ -13,6 +13,7 @@ from knowledge.config.settings import Settings
 from knowledge.repositories.postgres_vector_store_repository import (
     PostgresVectorStoreRepository,
 )
+import knowledge.repositories.postgres_vector_store_repository as pgvector_module
 from knowledge.schemas.documents import KnowledgeChunk
 
 
@@ -54,6 +55,32 @@ def test_embedding_dimension_is_validated_before_database_access():
 
     with pytest.raises(ValueError, match="1024"):
         repository.upsert_with_embeddings([chunk("a", "A")], [[0.1, 0.2]])
+
+
+def test_pgvector_pool_does_not_keep_an_idle_connection(monkeypatch):
+    captured = {}
+
+    class Pool:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def wait(self, timeout):
+            captured["wait_timeout"] = timeout
+
+    monkeypatch.setattr(pgvector_module, "ConnectionPool", Pool)
+    settings = Settings(
+        _env_file=None,
+        VECTOR_STORE_PROVIDER="pgvector",
+        DATABASE_URL="postgresql://agent:secret@db.internal/middle_agent",
+        DATABASE_POOL_SIZE=1,
+        DATABASE_MAX_OVERFLOW=0,
+    )
+
+    PostgresVectorStoreRepository.from_settings(settings, embedding=None)
+
+    assert captured["min_size"] == 0
+    assert captured["max_size"] == 1
+    assert captured["max_idle"] == 5.0
 
 
 def test_vector_upsert_uses_copy_staging_without_embedding_api_calls():

@@ -160,6 +160,32 @@ from knowledge.swagger.inspector import SwaggerInspector
 logger = logging.getLogger(__name__)
 
 
+async def _warm_registry(
+    registry: RetrievalPipelineRegistry,
+    scopes: list[tuple[str, str | None]],
+) -> None:
+    try:
+        await asyncio.to_thread(registry.warm, scopes)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning("Retrieval pipeline warmup failed", exc_info=True)
+
+
+def _start_registry_warmup(
+    registry: RetrievalPipelineRegistry,
+    scopes: list[tuple[str, str | None]],
+    *,
+    enabled: bool = True,
+) -> asyncio.Task[None] | None:
+    if not enabled:
+        return None
+    return asyncio.create_task(
+        _warm_registry(registry, scopes),
+        name="retrieval-pipeline-warmup",
+    )
+
+
 def _build_manager_reasoning_synthesizer(
     settings: Settings,
     model_factory: AgentModelFactory,
@@ -194,7 +220,11 @@ def _build_agent_session_factory(
 
 
 def _bug_graph_saver_context(settings: Settings):
-    if settings.data_store_provider == "postgres":
+    checkpoint_provider = settings.bug_graph_checkpoint_provider
+    use_postgres = checkpoint_provider == "postgres" or (
+        checkpoint_provider == "auto" and settings.data_store_provider == "postgres"
+    )
+    if use_postgres:
         saver_url = postgres_saver_url(
             settings.resolved_psycopg_url,
             schema=settings.database_schema,
@@ -498,15 +528,6 @@ def create_app(
         registry_close = getattr(registry, "close", None)
         if callable(registry_close):
             application.state._runtime_cleanup.callback(registry_close)
-        await asyncio.to_thread(
-            registry.warm,
-            [
-                ("middle-platform", "指标平台"),
-                ("middle-platform", "审批流"),
-                ("middle-platform", "工作流"),
-                ("middle-platform", None),
-            ],
-        )
         mcp_client = MetricMCPClient(settings)
         application.state._runtime_cleanup.push_async_callback(mcp_client.close)
         await mcp_client.connect()
@@ -937,6 +958,16 @@ def create_app(
             },
             "swagger_cache": {"status": "available"},
         }
+        application.state.registry_warmup_task = _start_registry_warmup(
+            registry,
+            [
+                ("middle-platform", "指标平台"),
+                ("middle-platform", "审批流"),
+                ("middle-platform", "工作流"),
+                ("middle-platform", None),
+            ],
+            enabled=settings.retrieval_warmup_enabled,
+        )
         yield
 
     @asynccontextmanager
@@ -2187,8 +2218,7 @@ def create_app(
         if catalog is None:
             raise HTTPException(status_code=503, detail="knowledge catalog unavailable")
         result = []
-        for space in await catalog.list_spaces():
-            domains = await catalog.list_domains(space.id)
+        for space, domains in await catalog.list_spaces_with_domains():
             result.append(
                 {
                     "id": space.id,

@@ -35,7 +35,10 @@ function detailFrom(payload: unknown, fallback: string): string {
   return fallback;
 }
 
-export function createApiClient(getCsrfToken: () => string | null): ApiClient {
+export function createApiClient(
+  getCsrfToken: () => string | null,
+  requestTimeoutMs = 10_000,
+): ApiClient {
   async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const method = (init.method ?? "GET").toUpperCase();
     const headers = new Headers(init.headers);
@@ -43,12 +46,30 @@ export function createApiClient(getCsrfToken: () => string | null): ApiClient {
       const csrfToken = getCsrfToken();
       if (csrfToken) headers.set("X-CSRF-Token", csrfToken);
     }
-    const response = await fetch(`/api${path}`, {
-      ...init,
-      method,
-      headers,
-      credentials: "include",
-    });
+    const controller = new AbortController();
+    let timedOut = false;
+    const abortFromCaller = () => controller.abort(init.signal?.reason);
+    init.signal?.addEventListener("abort", abortFromCaller, { once: true });
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, requestTimeoutMs);
+    let response: Response;
+    try {
+      response = await fetch(`/api${path}`, {
+        ...init,
+        method,
+        headers,
+        credentials: "include",
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (timedOut) throw new Error("请求超时，请稍后重试");
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+      init.signal?.removeEventListener("abort", abortFromCaller);
+    }
     const contentType = response.headers.get("content-type") ?? "";
     const payload = contentType.includes("application/json")
       ? await response.json()

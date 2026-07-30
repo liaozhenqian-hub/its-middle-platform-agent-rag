@@ -70,7 +70,9 @@ async def test_start_builds_secret_safe_async_engine_configuration():
         DATABASE_POOL_SIZE=7,
         DATABASE_MAX_OVERFLOW=3,
         DATABASE_POOL_TIMEOUT_SECONDS=12,
+        DATABASE_POOL_RECYCLE_SECONDS=45,
         DATABASE_STATEMENT_TIMEOUT_SECONDS=45,
+        DATABASE_SSL_MODE="require",
         DATABASE_SCHEMA="agent_test",
     )
     resources = DatabaseResources(settings, engine_factory=factory)
@@ -83,10 +85,12 @@ async def test_start_builds_secret_safe_async_engine_configuration():
     assert captured["kwargs"]["pool_size"] == 7
     assert captured["kwargs"]["max_overflow"] == 3
     assert captured["kwargs"]["pool_timeout"] == 12
+    assert captured["kwargs"]["pool_recycle"] == 45
     assert captured["kwargs"]["connect_args"]["server_settings"] == {
         "statement_timeout": "45000",
         "search_path": "agent_test,public",
     }
+    assert captured["kwargs"]["connect_args"]["ssl"] == "require"
     assert "secret" not in repr(resources)
 
 

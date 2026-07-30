@@ -10,6 +10,7 @@ def test_persistence_defaults_keep_existing_local_providers():
     assert settings.data_store_provider == "sqlite"
     assert settings.vector_store_provider == "chroma"
     assert settings.database_schema == "public"
+    assert settings.database_ssl_mode == "prefer"
     assert settings.pgvector_table == "vector_entries"
     assert settings.pgvector_batch_size == 500
     assert settings.database_migration_batch_size == 5000
@@ -25,13 +26,14 @@ def test_database_url_takes_precedence_and_normalizes_async_driver():
         PGDATABASE="ignored",
         PGUSER="ignored",
         PGPASSWORD="ignored-secret",
+        DATABASE_SSL_MODE="require",
     )
 
     assert settings.resolved_database_url == (
         "postgresql+asyncpg://preferred:secret@db.internal:5432/middle_agent"
     )
     assert settings.resolved_psycopg_url == (
-        "postgresql://preferred:secret@db.internal:5432/middle_agent"
+        "postgresql://preferred:secret@db.internal:5432/middle_agent?sslmode=require"
     )
 
 
@@ -64,6 +66,7 @@ def test_split_pg_variables_are_safely_percent_encoded():
         ("DATABASE_MAX_OVERFLOW", -1),
         ("DATABASE_POOL_TIMEOUT_SECONDS", 0),
         ("DATABASE_STATEMENT_TIMEOUT_SECONDS", 0),
+        ("DATABASE_SSL_MODE", "sometimes"),
         ("VECTOR_SHADOW_SAMPLE_RATE", 0),
         ("VECTOR_SHADOW_SAMPLE_RATE", 1.1),
         ("PGVECTOR_BATCH_SIZE", 0),
