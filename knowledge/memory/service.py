@@ -42,18 +42,28 @@ class MemoryService:
         user_id: str | None,
         space_id: str,
         domain_id: str | None,
+        scopes: tuple[str, ...] | None = None,
+        conversation_id: str | None = None,
     ) -> list[Memory]:
+        allowed_scopes = set(scopes or ("user", "domain"))
         records: list[Memory] = []
-        if user_id:
+        if user_id and "user" in allowed_scopes:
             records.extend(
                 await self.repository.list_memories(
                     scope_type="user", owner_id=user_id, space_id=space_id
                 )
             )
-        if domain_id:
+        if domain_id and "domain" in allowed_scopes:
             records.extend(
                 await self.repository.list_memories(
                     scope_type="domain", owner_id=domain_id,
+                    space_id=space_id, domain_id=domain_id,
+                )
+            )
+        if conversation_id and "conversation" in allowed_scopes:
+            records.extend(
+                await self.repository.list_memories(
+                    scope_type="conversation", owner_id=conversation_id,
                     space_id=space_id, domain_id=domain_id,
                 )
             )
@@ -61,7 +71,7 @@ class MemoryService:
         indexed_ids: set[str] = set()
         if self.index is not None:
             try:
-                if user_id:
+                if user_id and "user" in allowed_scopes:
                     indexed_ids.update(await asyncio.to_thread(
                         self.index.search,
                         query,
@@ -71,7 +81,7 @@ class MemoryService:
                         domain_id=domain_id,
                         limit=self.max_recall,
                     ))
-                if domain_id:
+                if domain_id and "domain" in allowed_scopes:
                     indexed_ids.update(await asyncio.to_thread(
                         self.index.search,
                         query,
@@ -114,13 +124,20 @@ class MemoryService:
                 summary is not None
                 and summary.user_id == user_id
                 and summary.space_id == space_id
+                and summary.domain_id in {None, domain_id}
             ):
-                blocks.append(f"历史会话摘要（仅作上下文，不是知识库证据）：\n{summary.summary[:2000]}")
+                blocks.append(
+                    "历史会话摘要（仅作内部上下文，不是知识库证据；"
+                    "严禁在最终回答中复述标题、内容或来源）：\n"
+                    f"{summary.summary[:2000]}"
+                )
         memories = await self.recall(
             message,
             user_id=user_id,
             space_id=space_id,
             domain_id=domain_id,
+            scopes=("user", "domain"),
+            conversation_id=conversation_id,
         )
         memory_lines = [
             f"- [{item.memory_type}] {' '.join(str(item.summary).split())[:500]}"
@@ -128,7 +145,8 @@ class MemoryService:
         ]
         if memory_lines:
             blocks.append(
-                "已确认的长期记忆（只能作为用户背景，不能替代知识库证据）：\n"
+                "已确认的长期记忆（只能作为内部用户背景，不能替代知识库证据；"
+                "严禁在最终回答中复述标题、记忆类型或内容列表）：\n"
                 + "\n".join(memory_lines)
             )
         if not blocks:

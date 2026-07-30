@@ -70,6 +70,17 @@ describe("quality store", () => {
     expect(store.evalRuns[0].id).toBe("run-1");
   });
 
+  it("loads only enabled evaluation cases by default", async () => {
+    mocks.get.mockResolvedValueOnce([]);
+    const store = useQualityStore();
+
+    await store.loadEvalCases();
+
+    expect(mocks.get).toHaveBeenCalledWith(
+      "/v1/admin/quality/eval-cases?enabled=true",
+    );
+  });
+
   it("updates approval with only fields accepted by the backend", async () => {
     const store = useQualityStore();
     const item = {

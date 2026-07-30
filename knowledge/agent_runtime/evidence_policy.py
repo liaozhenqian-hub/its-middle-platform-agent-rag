@@ -16,6 +16,8 @@ class EvidenceLevel(str, Enum):
 class EvidencePolicy:
     """Deterministically prevents retrieval misses becoming capability facts."""
 
+    MISSING_FACT_NOTICE = "该事实目前没有证据支持，以下判断仅基于已找到的证据。"
+
     _CAPABILITY_TERM = (
         r"(?:能力|功能|机制|节点|接口|工作流|版本|转换|汇聚|重试)"
     )
@@ -37,6 +39,14 @@ class EvidencePolicy:
         for citation in items:
             metadata = citation.metadata
             if metadata.get("explicit_limitation") is True:
+                return EvidenceLevel.CONFIRMED
+            if citation.source_type in {
+                "product_document",
+                "knowledge_chunk",
+                "swagger",
+                "mcp_tool",
+                "log_trace",
+            }:
                 return EvidenceLevel.CONFIRMED
             symbol_type = str(
                 metadata.get("symbol_kind") or metadata.get("symbol_type") or ""

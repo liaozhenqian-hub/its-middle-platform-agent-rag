@@ -144,6 +144,12 @@ class Settings(BaseSettings):
         ge=1,
         alias="AGENT_RETRIEVAL_MAX_IDENTICAL_QUERIES",
     )
+    agent_retrieval_timeout_seconds: float = Field(
+        default=20,
+        gt=0,
+        le=120,
+        alias="AGENT_RETRIEVAL_TIMEOUT_SECONDS",
+    )
     agent_public_citation_limit: int = Field(
         default=10,
         ge=1,
@@ -241,6 +247,16 @@ class Settings(BaseSettings):
     )
     agent_quality_semantic_judge_enabled: bool = Field(
         default=True, alias="AGENT_QUALITY_SEMANTIC_JUDGE_ENABLED"
+    )
+    agent_quality_judge_model: str = Field(
+        default="deepseek-v4-flash",
+        alias="AGENT_QUALITY_JUDGE_MODEL",
+    )
+    agent_quality_judge_timeout_seconds: float = Field(
+        default=20,
+        gt=0,
+        le=120,
+        alias="AGENT_QUALITY_JUDGE_TIMEOUT_SECONDS",
     )
     agent_quality_eval_worker_enabled: bool = Field(
         default=True, alias="AGENT_QUALITY_EVAL_WORKER_ENABLED"

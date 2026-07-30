@@ -107,6 +107,7 @@ class AgentRunContext:
     current_user_message: str = field(default="", repr=False, compare=False)
     metric_confirmation_token: str | None = None
     metric_confirmed_app: str | None = None
+    metric_query_stage: str = "discovering"
     citations: list[Citation] = field(default_factory=list)
     tool_runs: list[ToolRun] = field(default_factory=list)
     approvals: list[ApprovalRecord] = field(default_factory=list)
@@ -117,6 +118,11 @@ class AgentRunContext:
         compare=False,
     )
     retrieval_call_count: int = field(default=0, repr=False, compare=False)
+    evidence_collection_domains: list[str] = field(
+        default_factory=list,
+        repr=False,
+        compare=False,
+    )
 
     def reserve_retrieval(
         self,
@@ -352,6 +358,7 @@ class AgentRunContext:
             task_type=str(data.get("task_type") or "unknown"),
             metric_confirmation_token=data.get("metric_confirmation_token"),
             metric_confirmed_app=data.get("metric_confirmed_app"),
+            metric_query_stage=str(data.get("metric_query_stage") or "discovering"),
             citations=[Citation(**item) for item in data.get("citations", [])],
             tool_runs=[ToolRun(**item) for item in data.get("tool_runs", [])],
             approvals=[ApprovalRecord(**item) for item in data.get("approvals", [])],

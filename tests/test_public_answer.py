@@ -1,5 +1,6 @@
 from knowledge.agent_runtime.context import Citation
 from knowledge.agent_runtime.public_answer import (
+    INTERNAL_CONTEXT_LEAK_ANSWER,
     PublicAnswerStream,
     public_citation_name,
     sanitize_public_answer,
@@ -80,3 +81,63 @@ def test_public_answer_removes_unmapped_chunk_identifiers():
     assert "chunk_id" not in answer.casefold()
     assert "chunk-012345" not in answer
     assert "知识文档" in answer
+
+
+def test_public_answer_blocks_internal_memory_context_echo():
+    answer = sanitize_public_answer(
+        "历史会话摘要（仅作上下文，不是知识库证据）：\n"
+        "最近问题：你好\n\n"
+        "已确认的长期记忆（只能作为用户背景）：\n"
+        "- [procedural_memory] 内部排障流程\n\n"
+        "当前问题：\n请查询审批流接口"
+    )
+
+    assert answer == INTERNAL_CONTEXT_LEAK_ANSWER
+    assert "历史会话摘要" not in answer
+    assert "procedural_memory" not in answer
+
+
+def test_public_answer_keeps_safe_prefix_before_internal_memory_context():
+    answer = sanitize_public_answer(
+        "接口已在 develop 分支实现。\n\n"
+        "### 历史会话摘要（仅作上下文，不是知识库证据）：\n内部内容"
+    )
+
+    assert answer == "接口已在 develop 分支实现。"
+
+
+def test_public_answer_blocks_direct_internal_memory_type_echo():
+    answer = sanitize_public_answer(
+        "**[procedural_memory]** prod 环境 Bug 标准排障流程"
+    )
+
+    assert answer == INTERNAL_CONTEXT_LEAK_ANSWER
+
+
+def test_public_answer_stream_blocks_memory_header_split_across_deltas():
+    stream = PublicAnswerStream(tail_chars=48)
+
+    output = "".join(
+        [
+            stream.feed("历"),
+            stream.feed("史会话摘"),
+            stream.feed("要（仅作上下文，不是知识库证据）：\n内部内容"),
+            stream.flush(),
+        ]
+    )
+
+    assert output == INTERNAL_CONTEXT_LEAK_ANSWER
+
+
+def test_public_answer_stream_keeps_normal_answer():
+    stream = PublicAnswerStream(tail_chars=48)
+
+    output = "".join(
+        [
+            stream.feed("审批流接口"),
+            stream.feed("需要 processInstanceId 参数。"),
+            stream.flush(),
+        ]
+    )
+
+    assert output == "审批流接口需要 processInstanceId 参数。"

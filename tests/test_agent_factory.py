@@ -61,7 +61,6 @@ def test_agent_factory_builds_manager_with_domain_and_bug_specialists_as_tools()
     metric = topology.specialists["metric_platform_expert"]
     assert metric.mcp_servers == [topology.metric_mcp_server]
     assert {tool.name for tool in metric.tools} == {
-        "search_metric_platform_knowledge",
         "collect_domain_evidence",
         "prepare_metric_query",
         "query_metric_data_guarded",
@@ -83,7 +82,6 @@ def test_agent_factory_omits_mcp_when_unavailable_but_keeps_metric_rag():
     metric = topology.specialists["metric_platform_expert"]
     assert metric.mcp_servers == []
     assert {tool.name for tool in metric.tools} == {
-        "search_metric_platform_knowledge",
         "collect_domain_evidence",
     }
     assert "bug_diagnosis_expert" not in {tool.name for tool in topology.manager.tools}

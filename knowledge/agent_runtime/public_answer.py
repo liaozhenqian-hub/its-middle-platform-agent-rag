@@ -20,6 +20,37 @@ _STREAM_INTERNAL_SUFFIX = re.compile(
     r"(?:[_ :：=#-][A-Za-z0-9._:/-]*)?$"
 )
 _INTERNAL_PREFIXES = ("chunk", "source", "code", "doc", "document", "swagger")
+INTERNAL_CONTEXT_LEAK_ANSWER = "抱歉，本次回答生成异常，请重新提问。"
+_INTERNAL_MEMORY_LINE = re.compile(
+    r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*|__)?(?:"
+    r"历史会话摘要|已确认的长期记忆|相关历史上下文|"
+    r"\[(?:user_preference|user_context|episodic_memory|"
+    r"decision_memory|procedural_memory)\]"
+    r")"
+)
+_INTERNAL_MEMORY_MARKERS = (
+    "历史会话摘要",
+    "已确认的长期记忆",
+    "相关历史上下文",
+    "[user_preference]",
+    "[user_context]",
+    "[episodic_memory]",
+    "[decision_memory]",
+    "[procedural_memory]",
+)
+
+
+def _possible_memory_prefix_start(text: str) -> int | None:
+    line_start = text.rfind("\n") + 1
+    candidate = text[line_start:].lstrip(" \t")
+    candidate = re.sub(r"^(?:#{1,6}[ \t]*|\*\*|__)", "", candidate)
+    normalized = candidate.casefold()
+    if not normalized or any(
+        marker.casefold().startswith(normalized)
+        for marker in _INTERNAL_MEMORY_MARKERS
+    ):
+        return line_start
+    return None
 
 
 def _value(citation: Any, key: str, default: Any = "") -> Any:
@@ -114,6 +145,12 @@ def _generic_internal_name(match: re.Match[str]) -> str:
 def sanitize_public_answer(text: str | None, citations: Iterable[Any] = ()) -> str:
     """Remove internal citation identities while preserving readable evidence names."""
     answer = str(text or "")
+    memory_match = _INTERNAL_MEMORY_LINE.search(answer)
+    if memory_match:
+        safe_prefix = answer[: memory_match.start()].rstrip()
+        if not safe_prefix:
+            return INTERNAL_CONTEXT_LEAK_ANSWER
+        answer = safe_prefix
     citation_list = list(citations)
     for citation in sorted(
         citation_list,
@@ -145,12 +182,35 @@ class PublicAnswerStream:
         self._citations = citations
         self._tail_chars = max(32, tail_chars)
         self._buffer = ""
+        self._blocked_internal_context = False
+        self._emitted_safe_text = False
 
     def _current_citations(self) -> Iterable[Any]:
         return self._citations() if callable(self._citations) else self._citations
 
     def feed(self, delta: str) -> str:
+        if self._blocked_internal_context:
+            return ""
         self._buffer += str(delta or "")
+        memory_match = _INTERNAL_MEMORY_LINE.search(self._buffer)
+        if memory_match:
+            ready = self._buffer[: memory_match.start()].rstrip()
+            self._buffer = ""
+            self._blocked_internal_context = True
+            public = sanitize_public_answer(ready, self._current_citations())
+            if public:
+                self._emitted_safe_text = True
+            return public
+        memory_prefix_start = _possible_memory_prefix_start(self._buffer)
+        if memory_prefix_start is not None:
+            ready, self._buffer = (
+                self._buffer[:memory_prefix_start],
+                self._buffer[memory_prefix_start:],
+            )
+            public = sanitize_public_answer(ready, self._current_citations())
+            if public:
+                self._emitted_safe_text = True
+            return public
         match = _STREAM_INTERNAL_SUFFIX.search(self._buffer)
         cut = match.start() if match else len(self._buffer)
         if not match:
@@ -169,8 +229,20 @@ class PublicAnswerStream:
         if cut <= 0:
             cut = len(self._buffer) - self._tail_chars
         ready, self._buffer = self._buffer[:cut], self._buffer[cut:]
-        return sanitize_public_answer(ready, self._current_citations())
+        public = sanitize_public_answer(ready, self._current_citations())
+        if public:
+            self._emitted_safe_text = True
+        return public
 
     def flush(self) -> str:
+        if self._blocked_internal_context:
+            self._buffer = ""
+            if self._emitted_safe_text:
+                return ""
+            self._emitted_safe_text = True
+            return INTERNAL_CONTEXT_LEAK_ANSWER
         ready, self._buffer = self._buffer, ""
-        return sanitize_public_answer(ready, self._current_citations())
+        public = sanitize_public_answer(ready, self._current_citations())
+        if public:
+            self._emitted_safe_text = True
+        return public

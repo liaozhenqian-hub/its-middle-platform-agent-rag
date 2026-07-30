@@ -546,6 +546,7 @@ def create_app(
             retrieval_max_identical_queries=(
                 settings.agent_retrieval_max_identical_queries
             ),
+            retrieval_timeout_seconds=settings.agent_retrieval_timeout_seconds,
             composite_evidence_enabled=settings.agent_composite_evidence_enabled,
             memory_service=memory_service,
             entity_memory_repository=entity_memory_repository,
@@ -595,7 +596,7 @@ def create_app(
             application.state._runtime_cleanup.push_async_callback(judge_client.close)
             semantic_judge = DeepSeekSemanticJudge(
                 client=judge_client,
-                model=settings.deepseek_reasoning_model,
+                model=settings.agent_quality_judge_model,
             )
         quality_evaluator = (
             QualityEvaluationService(
@@ -610,6 +611,7 @@ def create_app(
                 ),
                 semantic_judge=semantic_judge,
                 case_timeout_seconds=settings.agent_quality_eval_case_timeout_seconds,
+                judge_timeout_seconds=settings.agent_quality_judge_timeout_seconds,
                 run_config_snapshot={
                     "prompt_version": settings.agent_prompt_version,
                     "knowledge_count": registry.repository.count(),
