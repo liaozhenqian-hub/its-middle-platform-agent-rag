@@ -69,7 +69,7 @@ class MemoryService:
             )
         terms = self._terms(query)
         indexed_ids: set[str] = set()
-        if self.index is not None:
+        if self.index is not None and records:
             try:
                 if user_id and "user" in allowed_scopes:
                     indexed_ids.update(await asyncio.to_thread(
