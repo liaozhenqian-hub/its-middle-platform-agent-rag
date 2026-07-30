@@ -121,7 +121,7 @@ class SourceIndexCoordinator:
                 source_id,
                 config={**source.config, "last_synced_commit": snapshot.commit_sha},
             )
-            self.pipeline_registry.invalidate(app_id="middle-platform")
+            self.pipeline_registry.refresh(app_id="middle-platform")
             return IndexingSummary(
                 source_id, snapshot.commit_sha, version.id, 0, len(stale)
             )
@@ -159,7 +159,7 @@ class SourceIndexCoordinator:
             await self._delete_stale(stale)
             config = {**source.config, "last_synced_commit": snapshot.commit_sha}
             await self.catalog.update_source(source_id, config=config)
-            self.pipeline_registry.invalidate(app_id="middle-platform")
+            self.pipeline_registry.refresh(app_id="middle-platform")
             return IndexingSummary(
                 source_id,
                 snapshot.commit_sha,
@@ -242,7 +242,7 @@ class SourceIndexCoordinator:
                 source_id,
                 config={**source.config, "last_synced_version": version_ref},
             )
-            self.pipeline_registry.invalidate(app_id="middle-platform")
+            self.pipeline_registry.refresh(app_id="middle-platform")
             return IndexingSummary(source_id, version_ref, version.id, 0, len(stale))
 
         backups = await self._backup_vectors(baseline_entries)
@@ -264,7 +264,7 @@ class SourceIndexCoordinator:
                 source_id,
                 config={**source.config, "last_synced_version": version_ref},
             )
-            self.pipeline_registry.invalidate(app_id="middle-platform")
+            self.pipeline_registry.refresh(app_id="middle-platform")
             return IndexingSummary(
                 source_id,
                 version_ref,

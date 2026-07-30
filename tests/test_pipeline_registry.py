@@ -1,6 +1,7 @@
 from knowledge.agent_runtime.pipeline_registry import RetrievalPipelineRegistry
 from knowledge.config.settings import Settings
 import knowledge.agent_runtime.pipeline_registry as registry_module
+from threading import Event, Thread
 
 
 def test_pipeline_registry_caches_by_fixed_application_and_domain():
@@ -45,6 +46,80 @@ def test_pipeline_registry_atomically_invalidates_affected_cached_pipelines():
     assert registry.invalidate(app_id="middle-platform") == 3
     assert registry.get("middle-platform", "审批流") is not approval
     assert registry.get("middle-platform", None) is not unscoped
+
+
+def test_refresh_keeps_old_pipeline_visible_until_replacement_is_ready():
+    started = Event()
+    release = Event()
+    builds = []
+
+    def build(app_id, domain):
+        pipeline = object()
+        builds.append(pipeline)
+        if len(builds) == 2:
+            started.set()
+            release.wait(timeout=1)
+        return pipeline
+
+    registry = RetrievalPipelineRegistry(pipeline_builder=build)
+    old = registry.get("middle-platform", None)
+    thread = Thread(
+        target=lambda: registry.refresh(app_id="middle-platform"),
+        daemon=True,
+    )
+
+    thread.start()
+    assert started.wait(timeout=0.5)
+    assert registry.get("middle-platform", None) is old
+    release.set()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert registry.get("middle-platform", None) is builds[1]
+
+
+def test_refresh_failure_retains_old_pipeline_and_marks_unavailable():
+    calls = 0
+
+    def build(_app_id, _domain):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise RuntimeError("private refresh failure")
+        return object()
+
+    registry = RetrievalPipelineRegistry(pipeline_builder=build)
+    old = registry.get("middle-platform", None)
+
+    assert registry.refresh(app_id="middle-platform") == 0
+    assert registry.get("middle-platform", None) is old
+    assert registry.warm_status() == {
+        "status": "unavailable",
+        "cached_pipelines": 1,
+    }
+
+
+def test_refresh_can_fall_back_to_invalidating_cached_pipelines():
+    registry = RetrievalPipelineRegistry(
+        pipeline_builder=lambda *_args: object(),
+        stale_while_refresh_enabled=False,
+    )
+    old = registry.get("middle-platform", None)
+
+    assert registry.refresh(app_id="middle-platform") == 1
+    assert registry.get("middle-platform", None) is not old
+
+
+def test_warm_status_tracks_successful_warmup():
+    registry = RetrievalPipelineRegistry(pipeline_builder=lambda *_args: object())
+
+    assert registry.warm_status()["status"] == "warming"
+    registry.warm([("middle-platform", None)])
+
+    assert registry.warm_status() == {
+        "status": "available",
+        "cached_pipelines": 1,
+    }
 
 
 def test_pipeline_registry_uses_the_configured_vector_provider_factory(monkeypatch):

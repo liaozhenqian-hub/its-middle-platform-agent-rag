@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import logging
 from threading import Lock
 from typing import Any
 
@@ -15,6 +16,9 @@ from knowledge.services.retrieval_pipeline_factory import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 class RetrievalPipelineRegistry:
     """Cache one BM25-backed retrieval pipeline for each trusted domain scope."""
 
@@ -23,12 +27,23 @@ class RetrievalPipelineRegistry:
         settings: Settings | None = None,
         repository: Any | None = None,
         pipeline_builder: Callable[[str, str | None], Any] | None = None,
+        stale_while_refresh_enabled: bool | None = None,
     ):
         self.settings = settings
         self.repository = repository
         self.query_rewriter = None
         self._pipelines: dict[tuple[str, str], Any] = {}
         self._lock = Lock()
+        self._warm_state = "warming"
+        self.stale_while_refresh_enabled = (
+            settings.bm25_stale_while_refresh_enabled
+            if stale_while_refresh_enabled is None and settings is not None
+            else (
+                True
+                if stale_while_refresh_enabled is None
+                else stale_while_refresh_enabled
+            )
+        )
 
         if pipeline_builder is not None:
             self._pipeline_builder = pipeline_builder
@@ -72,8 +87,72 @@ class RetrievalPipelineRegistry:
             return pipeline
 
     def warm(self, scopes: list[tuple[str, str]]) -> None:
-        for app_id, domain in scopes:
-            self.get(app_id, domain)
+        with self._lock:
+            self._warm_state = "warming"
+        try:
+            for app_id, domain in scopes:
+                self.get(app_id, domain)
+        except Exception:
+            with self._lock:
+                self._warm_state = "unavailable"
+            raise
+        with self._lock:
+            self._warm_state = "available"
+
+    def warm_status(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "status": self._warm_state,
+                "cached_pipelines": len(self._pipelines),
+            }
+
+    def refresh(
+        self,
+        *,
+        app_id: str | None = None,
+        domain: str | None = None,
+    ) -> int:
+        """Build replacements without blocking reads and atomically publish them."""
+        if not self.stale_while_refresh_enabled:
+            return self.invalidate(app_id=app_id, domain=domain)
+
+        normalized_app_id = app_id.strip() if app_id and app_id.strip() else None
+        normalized_domain = domain.strip() if domain and domain.strip() else None
+        with self._lock:
+            snapshots = {
+                key: pipeline
+                for key, pipeline in self._pipelines.items()
+                if normalized_app_id is None
+                or (
+                    key[0] == normalized_app_id
+                    and (domain is None or key[1] == (normalized_domain or ""))
+                )
+            }
+        if not snapshots:
+            return 0
+
+        try:
+            replacements = {
+                key: self._pipeline_builder(key[0], key[1] or None)
+                for key in snapshots
+            }
+        except Exception as exc:
+            with self._lock:
+                self._warm_state = "unavailable"
+            logger.warning(
+                "Retrieval pipeline refresh failed error_type=%s",
+                type(exc).__name__,
+            )
+            return 0
+
+        with self._lock:
+            replaced = 0
+            for key, replacement in replacements.items():
+                if self._pipelines.get(key) is snapshots[key]:
+                    self._pipelines[key] = replacement
+                    replaced += 1
+            self._warm_state = "available"
+            return replaced
 
     def invalidate(
         self,
