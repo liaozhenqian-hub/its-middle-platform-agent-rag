@@ -110,6 +110,22 @@ def test_settings_exposes_query_rewrite_and_rerank_defaults():
     assert settings.vector_candidate_k == 20
     assert settings.final_result_k == 5
     assert settings.retrieval_warmup_enabled is True
+    assert settings.bm25_memory_filter_enabled is True
+    assert settings.bm25_stale_while_refresh_enabled is True
+    assert settings.retrieval_parallel_routes_enabled is True
+
+
+def test_retrieval_performance_switches_can_be_disabled():
+    settings = Settings(
+        _env_file=None,
+        BM25_MEMORY_FILTER_ENABLED=False,
+        BM25_STALE_WHILE_REFRESH_ENABLED=False,
+        RETRIEVAL_PARALLEL_ROUTES_ENABLED=False,
+    )
+
+    assert settings.bm25_memory_filter_enabled is False
+    assert settings.bm25_stale_while_refresh_enabled is False
+    assert settings.retrieval_parallel_routes_enabled is False
 
 
 def test_settings_exposes_logging_defaults():

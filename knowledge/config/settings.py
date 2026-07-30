@@ -76,6 +76,18 @@ class Settings(BaseSettings):
         default=True,
         alias="RETRIEVAL_WARMUP_ENABLED",
     )
+    bm25_memory_filter_enabled: bool = Field(
+        default=True,
+        alias="BM25_MEMORY_FILTER_ENABLED",
+    )
+    bm25_stale_while_refresh_enabled: bool = Field(
+        default=True,
+        alias="BM25_STALE_WHILE_REFRESH_ENABLED",
+    )
+    retrieval_parallel_routes_enabled: bool = Field(
+        default=True,
+        alias="RETRIEVAL_PARALLEL_ROUTES_ENABLED",
+    )
 
     legacy_openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     legacy_openai_base_url: str = Field(default="", alias="OPENAI_BASE_URL")
