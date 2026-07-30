@@ -4,6 +4,7 @@ from rank_bm25 import BM25Plus
 
 from knowledge.retrieval.tokenizer import JiebaSearchTokenizer
 from knowledge.schemas.documents import KeywordIndexRecord, KnowledgeChunk, RouteSearchResult
+from knowledge.services.metadata_filter import matches_metadata
 
 
 class ChunkRepository(Protocol):
@@ -48,6 +49,7 @@ class KeywordRetrievalService:
         title_weight: float = 0.65,
         keywords_weight: float = 0.35,
         tokenizer: JiebaSearchTokenizer | None = None,
+        memory_filter_enabled: bool = True,
     ):
         normalized_app_id = app_id.strip()
         if not normalized_app_id:
@@ -74,6 +76,7 @@ class KeywordRetrievalService:
         self.title_weight = title_weight
         self.keywords_weight = keywords_weight
         self.tokenizer = tokenizer or JiebaSearchTokenizer()
+        self.memory_filter_enabled = memory_filter_enabled
         self.refresh()
 
     def refresh(self) -> None:
@@ -131,16 +134,24 @@ class KeywordRetrievalService:
         # eligible_ids 表示本次 search 真正允许参与排序的 chunk。
         # where=None 时，使用初始化时 scope_where 覆盖的所有记录；
         # where 不为空时，会把 app_id/domain/name 与额外 where 合并后去仓储过滤。
-        eligible_ids = (
-            set(self._record_indexes)
-            if where is None
-            else self.repository.get_chunk_ids(where=self.build_where(where))
-        )
-        eligible_indexes = {
-            self._record_indexes[chunk_id]
-            for chunk_id in eligible_ids
-            if chunk_id in self._record_indexes
-        }
+        if where is None:
+            eligible_indexes = set(range(len(self._records)))
+        elif self.memory_filter_enabled:
+            combined_where = self.build_where(where)
+            eligible_indexes = {
+                index
+                for index, record in enumerate(self._records)
+                if matches_metadata(record.metadata, combined_where)
+            }
+        else:
+            eligible_ids = self.repository.get_chunk_ids(
+                where=self.build_where(where)
+            )
+            eligible_indexes = {
+                self._record_indexes[chunk_id]
+                for chunk_id in eligible_ids
+                if chunk_id in self._record_indexes
+            }
         # 分别计算标题字段和关键词字段的 BM25 原始分。
         title_scores = self._scores(
             self._title_index,
@@ -158,10 +169,7 @@ class KeywordRetrievalService:
         normalized_keywords = self._normalize(keyword_scores, eligible_indexes)
 
         candidates: list[tuple[float, KeywordIndexRecord]] = []
-        for chunk_id in eligible_ids:
-            index = self._record_indexes.get(chunk_id)
-            if index is None:
-                continue
+        for index in eligible_indexes:
             score = (
                 normalized_titles[index] * self.title_weight
                 + normalized_keywords[index] * self.keywords_weight
