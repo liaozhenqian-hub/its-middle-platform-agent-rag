@@ -429,7 +429,24 @@ class PostgresVectorStoreRepository:
     ) -> list[KeywordIndexRecord]:
         where_sql, params = self._where_sql(where)
         statement = sql.SQL(
-            "SELECT id, heading, metadata FROM {} "
+            "SELECT id, heading, metadata ->> 'bm25_keywords', "
+            "jsonb_strip_nulls(jsonb_build_object("
+            "'chunk_id', metadata -> 'chunk_id', "
+            "'app_id', app_id, "
+            "'domain', domain, "
+            "'domain_id', metadata -> 'domain_id', "
+            "'source_id', source_id, "
+            "'source_type', source_type, "
+            "'branch', branch, "
+            "'owner_id', owner_id, "
+            "'scope_type', scope_type, "
+            "'space_id', space_id, "
+            "'enabled', enabled, "
+            "'name', metadata -> 'name', "
+            "'chunk_type', metadata -> 'chunk_type', "
+            "'symbol_type', metadata -> 'symbol_type', "
+            "'language', metadata -> 'language'"
+            ")) FROM {} "
             "WHERE collection_name = %s AND ({}) ORDER BY id"
         ).format(self._qualified_table, sql.SQL(where_sql))
         records: list[KeywordIndexRecord] = []
@@ -440,13 +457,13 @@ class PostgresVectorStoreRepository:
                     rows = cursor.fetchmany(2000)
                     if not rows:
                         break
-                    for record_id, heading, raw_metadata in rows:
+                    for record_id, heading, keywords, raw_metadata in rows:
                         metadata = dict(raw_metadata or {})
                         records.append(
                             KeywordIndexRecord(
                                 chunk_id=str(metadata.get("chunk_id") or record_id),
                                 heading=str(heading or metadata.get("heading", "")),
-                                keywords=str(metadata.get("bm25_keywords", "")),
+                                keywords=str(keywords or ""),
                                 metadata=metadata,
                             )
                         )

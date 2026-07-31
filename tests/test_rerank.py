@@ -90,6 +90,19 @@ def test_hybrid_rerank_falls_back_to_rrf_when_provider_fails(caplog):
     assert "rerank unavailable" in caplog.text
 
 
+def test_hybrid_rerank_temporarily_skips_calls_after_non_retryable_error():
+    error = RuntimeError("provider rejected request")
+    error.status_code = 400
+    reranker = FakeReranker(error=error)
+    service = HybridRerankService(reranker=reranker)
+    keyword_results = [_result("shared", "keyword", 1, 1.0)]
+
+    service.rank("first query", keyword_results, [], top_k=1)
+    service.rank("second query", keyword_results, [], top_k=1)
+
+    assert len(reranker.calls) == 1
+
+
 class FakeOpenAIClient:
     def __init__(self):
         self.calls = []

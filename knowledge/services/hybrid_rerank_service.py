@@ -9,6 +9,7 @@ from knowledge.schemas.documents import (
     RerankScore,
     RouteSearchResult,
 )
+from knowledge.services.provider_circuit import NonRetryableProviderCircuit
 
 
 logger = logging.getLogger(__name__)
@@ -34,9 +35,17 @@ class HybridRerankService:
     RRF 只依赖每一路内部 rank，因此适合作为不同召回路线之间的稳健融合方式。
     """
 
-    def __init__(self, reranker: Reranker | None = None, rrf_k: int = 60):
+    def __init__(
+        self,
+        reranker: Reranker | None = None,
+        rrf_k: int = 60,
+        provider_failure_cooldown_seconds: float = 60.0,
+    ):
         self.reranker = reranker
         self.rrf_k = rrf_k
+        self.rerank_circuit = NonRetryableProviderCircuit(
+            provider_failure_cooldown_seconds
+        )
 
     def merge(
         self,
@@ -113,9 +122,10 @@ class HybridRerankService:
 
         # 优先使用外部 cross-encoder reranker。
         # reranker 会同时看 query 和候选正文，通常比单纯 RRF 更懂“是否真正回答问题”。
-        if self.reranker is not None:
+        if self.reranker is not None and self.rerank_circuit.allow():
             try:
                 scores = self.reranker.rerank(query, candidates, top_k)
+                self.rerank_circuit.record_success()
                 results = [
                     self._final_result(
                         candidates[score.index],
@@ -127,7 +137,8 @@ class HybridRerankService:
                 ]
                 if results:
                     return HybridRankResult(results=results, rerank_applied=True)
-            except Exception:
+            except Exception as exc:
+                self.rerank_circuit.record_failure(exc)
                 # rerank 是增强能力，不应该让检索整体失败。
                 # 失败时继续走下面的 RRF 兜底结果。
                 logger.warning(

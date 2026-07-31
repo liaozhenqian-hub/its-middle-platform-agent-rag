@@ -62,7 +62,7 @@ class DatabaseResources:
             max_overflow=self.settings.database_max_overflow,
             pool_timeout=self.settings.database_pool_timeout_seconds,
             pool_recycle=self.settings.database_pool_recycle_seconds,
-            pool_pre_ping=True,
+            pool_pre_ping=self.settings.database_pool_pre_ping,
             connect_args={
                 "ssl": self.settings.database_ssl_mode,
                 "server_settings": {

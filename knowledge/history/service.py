@@ -57,31 +57,49 @@ class ConversationHistoryService:
             raise ValueError("invalid conversation history pagination")
         normalized_query = " ".join(query.split()).casefold()
         owners = await self.auth_repository.list_conversations_for_owner(owner_id)
+        start = (page - 1) * page_size
+        if not normalized_query:
+            page_owners = owners[start:start + page_size]
+            details = await self._read_details(page_owners)
+            items = [
+                self._history_item(owner, details.get(owner.conversation_id))
+                for owner in page_owners
+            ]
+            return ConversationHistoryPage(
+                items=tuple(item for item in items if item is not None),
+                total=len(owners),
+                page=page,
+                page_size=page_size,
+            )
         details = await self._read_details(owners)
         items: list[ConversationHistoryItem] = []
         for owner in owners:
             detail = details.get(owner.conversation_id)
-            if detail is None or not detail.messages:
+            item = self._history_item(owner, detail)
+            if item is None:
                 continue
-            preview = _preview(detail.messages[-1].content, 140)
-            item = ConversationHistoryItem(
-                conversation_id=owner.conversation_id,
-                title=detail.title,
-                preview=preview,
-                channel=owner.channel,
-                message_count=len(detail.messages),
-                created_at=owner.created_at,
-                updated_at=owner.last_seen_at,
-            )
             searchable = f"{item.title} {item.preview}".casefold()
-            if not normalized_query or normalized_query in searchable:
+            if normalized_query in searchable:
                 items.append(item)
-        start = (page - 1) * page_size
         return ConversationHistoryPage(
             items=tuple(items[start:start + page_size]),
             total=len(items),
             page=page,
             page_size=page_size,
+        )
+
+    @staticmethod
+    def _history_item(owner, detail) -> ConversationHistoryItem | None:
+        if detail is None or not detail.messages:
+            return None
+        return ConversationHistoryItem(
+            conversation_id=owner.conversation_id,
+            title=detail.title,
+            preview=_preview(detail.messages[-1].content, 140),
+            channel=owner.channel,
+            message_count=len(detail.messages),
+            created_at=owner.created_at,
+            updated_at=owner.last_seen_at,
         )
 
     async def get_conversation(

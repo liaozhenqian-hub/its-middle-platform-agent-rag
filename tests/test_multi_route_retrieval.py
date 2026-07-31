@@ -92,6 +92,14 @@ class FailingVectorRepository(DualRouteRepository):
         raise RuntimeError("private provider error")
 
 
+class NonRetryableVectorRepository(DualRouteRepository):
+    def search(self, query, k=5, where=None):
+        self.vector_queries.append((query, k, where))
+        error = RuntimeError("provider rejected request")
+        error.status_code = 400
+        raise error
+
+
 class CoordinatedKeywordService:
     app_id = "middle-platform"
 
@@ -204,6 +212,21 @@ def test_multi_route_search_falls_back_to_bm25_when_vector_query_fails(caplog):
     assert result.final_results[0].retrieval_routes == ("keyword",)
     assert "Vector retrieval failed; continuing with keyword results" in caplog.text
     assert "private provider error" not in caplog.text
+
+
+def test_multi_route_temporarily_skips_vector_after_non_retryable_provider_error():
+    repository = NonRetryableVectorRepository()
+    keyword_service = KeywordRetrievalService(
+        repository,
+        app_id="middle-platform",
+        domain="metric-platform",
+    )
+    service = MultiRouteRetrievalService(repository, keyword_service)
+
+    service.search("first query")
+    service.search("second query")
+
+    assert len(repository.vector_queries) == 1
 
 
 def test_multi_route_search_applies_required_scope_to_both_routes():

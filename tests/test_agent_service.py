@@ -374,6 +374,24 @@ class FakeModelFactory:
         )
 
 
+class RecordingScopeRepository:
+    def __init__(self):
+        self.get_calls = []
+        self.bind_calls = []
+
+    async def get(self, conversation_id):
+        self.get_calls.append(conversation_id)
+        return None
+
+    async def bind(self, conversation_id, knowledge_space_id, domain_id):
+        self.bind_calls.append((conversation_id, knowledge_space_id, domain_id))
+        return SimpleNamespace(
+            conversation_id=conversation_id,
+            knowledge_space_id=knowledge_space_id,
+            domain_id=domain_id,
+        )
+
+
 class FakeDirectBugGraph:
     def __init__(
         self,
@@ -450,6 +468,33 @@ async def test_agent_service_runs_with_session_context_and_server_limits(tmp_pat
     assert kwargs["max_turns"] == 12
     assert kwargs["context"].conversation_id == "conversation-1"
     assert kwargs["session"].session_settings.limit == 50
+
+
+@pytest.mark.asyncio
+async def test_prepare_new_conversation_binds_scope_without_redundant_lookup(tmp_path):
+    pending = PendingRunRepository(tmp_path / "agent.db")
+    await pending.initialize()
+    scopes = RecordingScopeRepository()
+    service = AgentService(
+        manager=object(),
+        model_factory=FakeModelFactory(),
+        session_factory=AgentSessionFactory(tmp_path / "agent.db", 50),
+        pending_runs=pending,
+        scope_repository=scopes,
+        runner=FakeRunner(),
+    )
+
+    conversation_id = await service.prepare_conversation_scope(
+        None,
+        knowledge_space_id="middle-platform",
+        domain_id="approval-flow",
+        scope_provided=True,
+    )
+
+    assert scopes.get_calls == []
+    assert scopes.bind_calls == [
+        (conversation_id, "middle-platform", "approval-flow")
+    ]
 
 
 @pytest.mark.asyncio
@@ -1216,7 +1261,7 @@ async def test_agent_service_maps_sdk_stream_events_without_tool_output(tmp_path
 
     events = [
         event
-        async for event in service.stream_chat("你好", "conversation-stream")
+        async for event in service.stream_chat("审批流接口怎么查询", "conversation-stream")
     ]
 
     assert [event["event"] for event in events] == [

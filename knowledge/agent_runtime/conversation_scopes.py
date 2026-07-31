@@ -156,25 +156,32 @@ class PostgresConversationScopeRepository:
         if not conversation_id or not knowledge_space_id:
             raise ValueError("conversation and knowledge space IDs are required")
         async with self.database_resources.transaction() as connection:
-            await connection.execute(
-                postgres_insert(agent_conversation_scopes)
-                .values(
-                    conversation_id=conversation_id,
-                    knowledge_space_id=knowledge_space_id,
-                    domain_id=domain_id,
-                )
-                .on_conflict_do_nothing(
-                    index_elements=[agent_conversation_scopes.c.conversation_id]
-                )
-            )
             row = (
                 await connection.execute(
-                    select(agent_conversation_scopes).where(
-                        agent_conversation_scopes.c.conversation_id == conversation_id
+                    postgres_insert(agent_conversation_scopes)
+                    .values(
+                        conversation_id=conversation_id,
+                        knowledge_space_id=knowledge_space_id,
+                        domain_id=domain_id,
                     )
+                    .on_conflict_do_update(
+                        index_elements=[agent_conversation_scopes.c.conversation_id],
+                        set_={
+                            "knowledge_space_id": agent_conversation_scopes.c.knowledge_space_id,
+                            "domain_id": agent_conversation_scopes.c.domain_id,
+                        },
+                        where=(
+                            agent_conversation_scopes.c.knowledge_space_id
+                            == knowledge_space_id
+                        )
+                        & agent_conversation_scopes.c.domain_id.is_not_distinct_from(
+                            domain_id
+                        ),
+                    )
+                    .returning(agent_conversation_scopes)
                 )
-            ).mappings().one()
-        if row["knowledge_space_id"] != knowledge_space_id or row["domain_id"] != domain_id:
+            ).mappings().one_or_none()
+        if row is None:
             raise ConversationScopeConflictError(
                 "conversation is already bound to a different knowledge scope"
             )

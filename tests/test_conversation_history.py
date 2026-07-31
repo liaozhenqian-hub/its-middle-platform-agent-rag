@@ -142,6 +142,33 @@ async def test_history_list_batches_session_queries_for_multiple_conversations(t
 
 
 @pytest.mark.asyncio
+async def test_history_list_paginates_owners_before_loading_message_details(tmp_path):
+    module = importlib.import_module("knowledge.history.service")
+    auth = UserAuthRepository(tmp_path / "auth.db")
+    await auth.initialize()
+    session_db = tmp_path / "sessions.db"
+    for index in range(25):
+        conversation_id = f"c-{index:02d}"
+        await auth.bind_conversation_owner(conversation_id, "ou_user", channel="web")
+        _seed_session(session_db, conversation_id, f"question {index}", f"answer {index}")
+    service = module.ConversationHistoryService(auth, session_db)
+    loaded_conversations = []
+    original_read_details = service._read_details
+
+    async def captured_read_details(owners):
+        loaded_conversations.extend(item.conversation_id for item in owners)
+        return await original_read_details(owners)
+
+    service._read_details = captured_read_details
+
+    page = await service.list_conversations("ou_user", page=2, page_size=5)
+
+    assert page.total == 25
+    assert len(page.items) == 5
+    assert loaded_conversations == [item.conversation_id for item in page.items]
+
+
+@pytest.mark.asyncio
 async def test_history_rejects_cross_owner_read_and_rename(tmp_path):
     module = importlib.import_module("knowledge.history.service")
     service_type = module.ConversationHistoryService

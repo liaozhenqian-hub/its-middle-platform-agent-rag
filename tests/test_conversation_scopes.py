@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -5,6 +6,7 @@ import pytest
 from knowledge.agent_runtime.conversation_scopes import (
     ConversationScopeConflictError,
     ConversationScopeRepository,
+    PostgresConversationScopeRepository,
 )
 
 
@@ -54,3 +56,49 @@ async def test_conversation_scope_validates_identifiers(tmp_path: Path):
         await repository.bind("", "middle-platform", None)
     with pytest.raises(ValueError):
         await repository.bind("conversation-1", "", None)
+
+
+@pytest.mark.asyncio
+async def test_postgres_scope_binding_uses_one_atomic_statement():
+    row = {
+        "conversation_id": "conversation-1",
+        "knowledge_space_id": "middle-platform",
+        "domain_id": "approval-flow",
+        "created_at": datetime.now(UTC),
+    }
+    statements = []
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def one(self):
+            return row
+
+        def one_or_none(self):
+            return row
+
+    class Connection:
+        async def execute(self, statement):
+            statements.append(statement)
+            return Result()
+
+    class Transaction:
+        async def __aenter__(self):
+            return Connection()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+    class Resources:
+        def transaction(self):
+            return Transaction()
+
+    repository = PostgresConversationScopeRepository(Resources())
+
+    scope = await repository.bind(
+        "conversation-1", "middle-platform", "approval-flow"
+    )
+
+    assert scope.conversation_id == "conversation-1"
+    assert len(statements) == 1

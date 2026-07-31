@@ -59,15 +59,12 @@ class AnonymousIdentityService:
     ) -> IdentityResolution:
         current = _utc(now)
         if cookie_value:
-            device = await self.repository.get_active_anonymous_device(
-                hash_secret(cookie_value), now=current
+            device = await self.repository.refresh_active_anonymous_device(
+                hash_secret(cookie_value),
+                expires_at=current + timedelta(seconds=self.ttl_seconds),
+                now=current,
             )
             if device is not None:
-                device = await self.repository.touch_anonymous_device(
-                    device.owner_id,
-                    expires_at=current + timedelta(seconds=self.ttl_seconds),
-                    now=current,
-                )
                 return IdentityResolution(
                     identity=ResolvedIdentity(
                         owner_id=device.owner_id,

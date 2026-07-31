@@ -141,6 +141,10 @@ class Settings(BaseSettings):
         le=86400,
         alias="DATABASE_POOL_RECYCLE_SECONDS",
     )
+    database_pool_pre_ping: bool = Field(
+        default=True,
+        alias="DATABASE_POOL_PRE_PING",
+    )
     pgvector_pool_max_idle_seconds: float = Field(
         default=300.0,
         gt=0,

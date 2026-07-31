@@ -12,6 +12,13 @@ class GuardDecision:
 class RequestGuard:
     """Handle deterministic no-tool requests before invoking an LLM."""
 
+    _GREETINGS = {
+        "\u4f60\u597d",
+        "\u60a8\u597d",
+        "hello",
+        "hi",
+    }
+
     _SENSITIVE = (
         "银行卡密码",
         "同事密码",
@@ -26,6 +33,11 @@ class RequestGuard:
 
     def evaluate(self, message: str) -> GuardDecision | None:
         normalized = "".join(message.casefold().split())
+        if normalized in self._GREETINGS:
+            return GuardDecision(
+                behavior="greeting",
+                answer="你好，我可以协助查询审批流、工作流、指标平台和中台代码，也可以结合环境与 trace ID 定位故障。",
+            )
         if any(marker in normalized for marker in self._SENSITIVE):
             return GuardDecision(
                 behavior="refuse",

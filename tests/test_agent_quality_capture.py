@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -7,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from knowledge.agent_runtime.service import AgentRunResponse
 from knowledge.api.app import create_app
+from knowledge.config.settings import Settings
 from knowledge.quality import TurnCompletion, TurnStart
 
 
@@ -75,6 +77,65 @@ class BlockingQualityCapture(FakeQualityCapture):
         self.completed.set()
 
 
+class BlockingQualityStart(FakeQualityCapture):
+    def __init__(self):
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def start(self, value: TurnStart):
+        self.started.set()
+        await self.release.wait()
+        return await super().start(value)
+
+
+class ObservableAgentService(FakeAgentService):
+    def __init__(self, events):
+        super().__init__(events)
+        self.started = asyncio.Event()
+
+    async def stream_chat(self, message, conversation_id=None, *, run_id=None, **kwargs):
+        self.started.set()
+        async for event in super().stream_chat(
+            message, conversation_id, run_id=run_id, **kwargs
+        ):
+            yield event
+
+
+class BlockingIdentityService:
+    def __init__(self):
+        self.settings = Settings(_env_file=None)
+        self.ownership = self
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def resolve(self, **kwargs):
+        self.started.set()
+        await self.release.wait()
+        return SimpleNamespace(
+            identity=SimpleNamespace(
+                owner_id="anonymous-test-owner",
+                scopes=frozenset({"agent:query"}),
+                kind="anonymous",
+            ),
+            cookie_value=None,
+            clear_user_cookie=False,
+        )
+
+    async def claim(self, *args, **kwargs):
+        return None
+
+
+class ObservableScopeService(FakeAgentService):
+    def __init__(self, events):
+        super().__init__(events)
+        self.scope_started = asyncio.Event()
+
+    async def prepare_conversation_scope(self, conversation_id=None, **kwargs):
+        self.scope_started.set()
+        return await super().prepare_conversation_scope(conversation_id, **kwargs)
+
+
 def test_json_chat_captures_before_agent_and_returns_feedback_metadata():
     capture = FakeQualityCapture()
     service = FakeAgentService(capture.events)
@@ -120,7 +181,9 @@ def test_sse_chat_captures_terminal_response_and_exposes_quality_metadata():
     assert body.count("event: run.started") == 1
     assert '"quality_turn_id": "turn-1"' in body
     assert '"feedback_token": "feedback-token"' in body
-    assert [item[0] for item in capture.events] == ["start", "agent", capture.events[1][1]]
+    assert {item[0] for item in capture.events[:2]} == {"start", "agent"}
+    agent_run_id = next(item[1] for item in capture.events if item[0] == "agent")
+    assert capture.events[-1][0] == agent_run_id
     assert capture.events[2][1].answer == "公开回答"
 
 
@@ -148,6 +211,43 @@ async def test_stream_terminal_event_does_not_wait_for_quality_completion():
         assert not capture.completed.is_set()
         capture.release.set()
         await asyncio.wait_for(capture.completed.wait(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_sse_agent_starts_while_quality_turn_is_being_created():
+    capture = BlockingQualityStart()
+    service = ObservableAgentService(capture.events)
+    app = create_app(agent_service=service, quality_capture_service=capture)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response_task = asyncio.create_task(
+            client.post("/api/v1/agent/chat/stream", json={"message": "hello"})
+        )
+        await asyncio.wait_for(capture.started.wait(), timeout=0.5)
+        await asyncio.wait_for(service.started.wait(), timeout=0.5)
+        capture.release.set()
+        response = await asyncio.wait_for(response_task, timeout=1)
+
+    assert response.status_code == 200
+    assert "event: run.completed" in response.text
+
+
+@pytest.mark.asyncio
+async def test_sse_resolves_identity_and_conversation_scope_concurrently():
+    identity = BlockingIdentityService()
+    service = ObservableScopeService([])
+    app = create_app(agent_service=service, user_auth_service=identity)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response_task = asyncio.create_task(
+            client.post("/api/v1/agent/chat/stream", json={"message": "hello"})
+        )
+        await asyncio.wait_for(identity.started.wait(), timeout=0.5)
+        await asyncio.wait_for(service.scope_started.wait(), timeout=0.5)
+        identity.release.set()
+        response = await asyncio.wait_for(response_task, timeout=1)
+
+    assert response.status_code == 200
 
 
 class ErrorAgentService(FakeAgentService):

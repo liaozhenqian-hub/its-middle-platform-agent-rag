@@ -13,6 +13,7 @@ from knowledge.schemas.documents import (
 from knowledge.services.keyword_retrieval_service import KeywordRetrievalService
 from knowledge.services.query_identifiers import extract_exact_identifiers
 from knowledge.services.hybrid_rerank_service import HybridRerankService
+from knowledge.services.provider_circuit import NonRetryableProviderCircuit
 
 
 logger = logging.getLogger(__name__)
@@ -44,12 +45,16 @@ class MultiRouteRetrievalService:
         query_rewriter: QueryRewriter | None = None,
         hybrid_ranker: HybridRanker | None = None,
         parallel_routes_enabled: bool = True,
+        provider_failure_cooldown_seconds: float = 60.0,
     ):
         self.repository = repository
         self.keyword_service = keyword_service
         self.query_rewriter = query_rewriter
         self.hybrid_ranker = hybrid_ranker or HybridRerankService()
         self.parallel_routes_enabled = parallel_routes_enabled
+        self.vector_circuit = NonRetryableProviderCircuit(
+            provider_failure_cooldown_seconds
+        )
 
     def search(
         self,
@@ -121,13 +126,17 @@ class MultiRouteRetrievalService:
 
         def run_vector_route():
             route_started = perf_counter()
+            if not self.vector_circuit.allow():
+                return [], (perf_counter() - route_started) * 1000
             try:
                 results = self.repository.search(
                     rewrite.retrieval_query,
                     k=vector_k,
                     where=self.keyword_service.build_where(where),
                 )
+                self.vector_circuit.record_success()
             except Exception as exc:
+                self.vector_circuit.record_failure(exc)
                 logger.warning(
                     "Vector retrieval failed; continuing with keyword results error_type=%s",
                     type(exc).__name__,

@@ -154,6 +154,68 @@ def test_hnsw_build_and_analyze_use_identifier_safe_ddl():
     assert statements[1][0].startswith("ANALYZE")
 
 
+def test_keyword_index_reads_lightweight_metadata_projection():
+    statements = []
+
+    class Cursor:
+        def __init__(self):
+            self.pages = [[(
+                "chunk-1",
+                "管理员转办",
+                "管理员 转办 adminTransfer",
+                {
+                    "app_id": "middle-platform",
+                    "domain_id": "approval-flow",
+                    "source_type": "code",
+                    "branch": "develop",
+                },
+            )], []]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, statement, params):
+            statements.append((statement.as_string(), params))
+
+        def fetchmany(self, _size):
+            return self.pages.pop(0)
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return Cursor()
+
+    class Pool:
+        def connection(self):
+            return Connection()
+
+    repository = PostgresVectorStoreRepository(
+        pool=Pool(), collection_name="knowledge", embedding=None
+    )
+
+    records = repository.get_keyword_index_records(
+        where={"app_id": "middle-platform"}
+    )
+
+    assert records[0].keywords == "管理员 转办 adminTransfer"
+    assert records[0].metadata == {
+        "app_id": "middle-platform",
+        "domain_id": "approval-flow",
+        "source_type": "code",
+        "branch": "develop",
+    }
+    assert "metadata ->> 'bm25_keywords'" in statements[0][0]
+    assert "SELECT id, heading, metadata FROM" not in statements[0][0]
+
+
 @pytest.mark.live
 @pytest.mark.skipif(
     os.getenv("RUN_POSTGRES_INTEGRATION") != "1",

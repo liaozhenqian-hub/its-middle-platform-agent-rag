@@ -1391,16 +1391,32 @@ def create_app(
 
     @application.post("/api/v1/agent/chat/stream")
     async def chat_stream(body: ChatRequest, request: Request):
-        identity_resolution = await _resolve_user_identity(request, "agent:query")
         scope_provided = bool(
             {"knowledge_space_id", "domain_id"} & body.model_fields_set
         )
-        conversation_id = await request.app.state.agent_service.prepare_conversation_scope(
-            body.conversation_id,
-            knowledge_space_id=body.knowledge_space_id,
-            domain_id=body.domain_id,
-            scope_provided=scope_provided,
+        identity_task = asyncio.create_task(
+            _resolve_user_identity(request, "agent:query"),
+            name="chat-identity-resolution",
         )
+        scope_task = asyncio.create_task(
+            request.app.state.agent_service.prepare_conversation_scope(
+                body.conversation_id,
+                knowledge_space_id=body.knowledge_space_id,
+                domain_id=body.domain_id,
+                scope_provided=scope_provided,
+            ),
+            name="chat-conversation-scope",
+        )
+        try:
+            identity_resolution, conversation_id = await asyncio.gather(
+                identity_task, scope_task
+            )
+        except BaseException:
+            for task in (identity_task, scope_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(identity_task, scope_task, return_exceptions=True)
+            raise
         if identity_resolution is not None:
             await request.app.state.user_auth_service.ownership.claim(
                 conversation_id,
@@ -1421,17 +1437,21 @@ def create_app(
                     },
                 }
             )
-            quality_turn = await _start_quality_turn(
-                request,
-                body,
-                run_id=run_id,
-                conversation_id=conversation_id,
-                user_id=(
-                    identity_resolution.identity.owner_id
-                    if identity_resolution is not None
-                    else None
+            quality_turn_task = asyncio.create_task(
+                _start_quality_turn(
+                    request,
+                    body,
+                    run_id=run_id,
+                    conversation_id=conversation_id,
+                    user_id=(
+                        identity_resolution.identity.owner_id
+                        if identity_resolution is not None
+                        else None
+                    ),
                 ),
+                name="quality-turn-start",
             )
+            quality_turn = None
             terminal = False
             public_deltas: list[str] = []
             try:
@@ -1451,6 +1471,7 @@ def create_app(
                     if event["event"] == "text.delta":
                         public_deltas.append(str(data.get("delta") or ""))
                     if event["event"] in {"run.completed", "approval.required"}:
+                        quality_turn = await quality_turn_task
                         data["quality_turn_id"] = getattr(quality_turn, "id", None)
                         data["feedback_token"] = getattr(quality_turn, "feedback_token", None)
                         event["data"] = data
@@ -1487,6 +1508,9 @@ def create_app(
                         )
                     yield _sse(event)
             except asyncio.CancelledError:
+                if not quality_turn_task.done():
+                    quality_turn_task.cancel()
+                    await asyncio.gather(quality_turn_task, return_exceptions=True)
                 if not terminal:
                     _schedule_quality_completion(
                         run_id,
@@ -1501,6 +1525,9 @@ def create_app(
                     )
                 raise
             except Exception as exc:
+                if not quality_turn_task.done():
+                    quality_turn_task.cancel()
+                    await asyncio.gather(quality_turn_task, return_exceptions=True)
                 if not terminal:
                     terminal = True
                     _schedule_quality_completion(
@@ -1525,6 +1552,10 @@ def create_app(
                             },
                         }
                     )
+            finally:
+                if not quality_turn_task.done():
+                    quality_turn_task.cancel()
+                    await asyncio.gather(quality_turn_task, return_exceptions=True)
                 return
 
         response = StreamingResponse(

@@ -228,6 +228,34 @@ class UserAuthRepository:
             ).fetchone()
         return _anonymous_device(row) if row else None
 
+    async def refresh_active_anonymous_device(
+        self,
+        token_hash: str,
+        *,
+        expires_at: datetime,
+        now: datetime | None = None,
+    ) -> AnonymousDevice | None:
+        current = _utc(now)
+        async with self._connect() as database:
+            row = await (
+                await database.execute(
+                    """
+                    UPDATE anonymous_devices
+                    SET last_seen_at=?, expires_at=?
+                    WHERE token_hash=? AND disabled_at IS NULL AND expires_at>?
+                    RETURNING *
+                    """,
+                    (
+                        _iso(current),
+                        _iso(expires_at),
+                        token_hash,
+                        _iso(current),
+                    ),
+                )
+            ).fetchone()
+            await database.commit()
+        return _anonymous_device(row) if row else None
+
     async def touch_anonymous_device(
         self,
         owner_id: str,
@@ -608,37 +636,32 @@ class UserAuthRepository:
         owner_id = _required(owner_id, "owner_id")
         current = _utc(now)
         async with self._connect() as database:
-            await database.execute("BEGIN IMMEDIATE")
             row = await (
-                await database.execute(
-                    """
-                    SELECT * FROM web_conversation_owners WHERE conversation_id=?
-                    """,
-                    (conversation_id,),
-                )
-            ).fetchone()
-            if row is not None and row["owner_id"] != owner_id:
-                await database.rollback()
-                raise PermissionError("conversation is owned by another identity")
-            if row is None:
                 await database.execute(
                     """
                     INSERT INTO web_conversation_owners(
                         conversation_id,owner_id,channel,created_at,last_seen_at
                     ) VALUES(?,?,?,?,?)
+                    ON CONFLICT(conversation_id) DO UPDATE SET
+                        channel=excluded.channel,
+                        last_seen_at=excluded.last_seen_at
+                    WHERE web_conversation_owners.owner_id=excluded.owner_id
+                    RETURNING *
                     """,
-                    (conversation_id, owner_id, channel, _iso(current), _iso(current)),
+                    (
+                        conversation_id,
+                        owner_id,
+                        channel,
+                        _iso(current),
+                        _iso(current),
+                    ),
                 )
-            else:
-                await database.execute(
-                    """
-                    UPDATE web_conversation_owners SET channel=?,last_seen_at=?
-                    WHERE conversation_id=?
-                    """,
-                    (channel, _iso(current), conversation_id),
-                )
+            ).fetchone()
+            if row is None:
+                await database.rollback()
+                raise PermissionError("conversation is owned by another identity")
             await database.commit()
-        return await self.get_conversation_owner(conversation_id)
+        return _conversation_owner(row)
 
     async def get_conversation_owner(
         self, conversation_id: str

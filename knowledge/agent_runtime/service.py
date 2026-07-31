@@ -707,15 +707,23 @@ class AgentService:
         domain_id: str | None = None,
         scope_provided: bool = False,
     ) -> str:
+        is_new_conversation = conversation_id is None
         resolved_conversation_id = conversation_id or str(uuid4())
         lock = await self._conversation_lock(resolved_conversation_id)
         async with lock:
-            await self._resolve_scope(
-                resolved_conversation_id,
-                knowledge_space_id,
-                domain_id,
-                scope_provided,
-            )
+            if is_new_conversation and self.scope_repository is not None:
+                await self.scope_repository.bind(
+                    resolved_conversation_id,
+                    knowledge_space_id or "middle-platform",
+                    domain_id,
+                )
+            else:
+                await self._resolve_scope(
+                    resolved_conversation_id,
+                    knowledge_space_id,
+                    domain_id,
+                    scope_provided,
+                )
         return resolved_conversation_id
 
     async def _response_from_result(
