@@ -269,13 +269,17 @@ def test_production_lifespan_wires_catalog_scopes_and_swagger_provider(
         async def close(self):
             captured["feishu_closed"] = True
 
+    def fake_agent_service(**kwargs):
+        captured["agent_service"] = kwargs
+        return object()
+
     monkeypatch.setattr(app_module, "Settings", lambda: settings)
     monkeypatch.setattr(app_module, "configure_logging", lambda settings: None)
     monkeypatch.setattr(app_module, "AgentModelFactory", FakeModelFactory)
     monkeypatch.setattr(app_module, "RetrievalPipelineRegistry", FakeRegistry)
     monkeypatch.setattr(app_module, "MetricMCPClient", FakeMCP)
     monkeypatch.setattr(app_module, "AgentFactory", FakeAgentFactory)
-    monkeypatch.setattr(app_module, "AgentService", lambda **kwargs: object())
+    monkeypatch.setattr(app_module, "AgentService", fake_agent_service)
     monkeypatch.setattr(app_module, "LarkOapiGateway", FakeFeishuGateway, raising=False)
     monkeypatch.setattr(app_module, "RelationalRepositoryFactory", FakeRelationalFactory)
     monkeypatch.setattr(app_module, "FeishuBotBridge", FakeFeishuBridge, raising=False)
@@ -299,6 +303,9 @@ def test_production_lifespan_wires_catalog_scopes_and_swagger_provider(
     assert captured["agent_factory"]["swagger_inspector"] is not None
     assert captured["agent_factory"]["swagger_source_provider"] is not None
     assert captured["agent_factory"]["bug_graph_service"] is not None
+    assert captured["agent_service"]["public_citation_limit"] == 5
+    assert captured["agent_service"]["citation_min_rerank_score"] == 0.35
+    assert captured["agent_service"]["citation_min_rrf_score"] == 0.02
     assert captured["mcp_closed"] is True
     assert captured["feishu_started"] is True
     assert captured["feishu_closed"] is True

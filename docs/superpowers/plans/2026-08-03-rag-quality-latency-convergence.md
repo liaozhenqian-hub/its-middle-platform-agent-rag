@@ -227,7 +227,7 @@ git commit -m "fix: enforce cross-tool retrieval budget"
 - Test: `tests/test_app_lifespan.py`
 - Test: `tests/test_settings.py`
 
-- [ ] **Step 1: Write failing citation quality tests**
+- [x] **Step 1: Write failing citation quality tests**
 
 ```python
 def test_public_citations_keep_only_strong_results_without_padding():
@@ -243,13 +243,13 @@ def test_public_citations_keep_only_strong_results_without_padding():
 
 Add tests for exact hits without a Rerank score, strict RRF fallback, logical-source deduplication, source diversity and hard cap five.
 
-- [ ] **Step 2: Run the context tests and verify RED**
+- [x] **Step 2: Run the context tests and verify RED**
 
 Run: `python -m pytest tests/test_agent_context.py -k citation -q`
 
 Expected: FAIL because citations are currently insertion-ordered and unscored.
 
-- [ ] **Step 3: Attach trusted quality signals when adding citations**
+- [x] **Step 3: Attach trusted quality signals when adding citations**
 
 `rag_tools.py` merges server-generated `_retrieval` metadata into each citation:
 
@@ -265,7 +265,7 @@ Expected: FAIL because citations are currently insertion-ordered and unscored.
 
 The fields are never taken from model input.
 
-- [ ] **Step 4: Implement the selector and configuration**
+- [x] **Step 4: Implement the selector and configuration**
 
 Defaults:
 
@@ -277,17 +277,17 @@ AGENT_CITATION_MIN_RRF_SCORE=0.02
 
 MCP, Swagger and verified log-trace citations remain eligible because they are deterministic tool evidence. Code and document citations pass exact/Rerank/RRF gates. The selector sorts by exactness and score, deduplicates, preserves useful source diversity, and never pads to three.
 
-- [ ] **Step 5: Inject thresholds into AgentService**
+- [x] **Step 5: Inject thresholds into AgentService**
 
 Extend `AgentService` constructor and all `public_citations` calls with the configured thresholds. Update app lifespan and tests to prove the values propagate.
 
-- [ ] **Step 6: Run focused tests and verify GREEN**
+- [x] **Step 6: Run focused tests and verify GREEN**
 
 Run: `python -m pytest tests/test_agent_context.py tests/test_agent_service.py tests/test_app_lifespan.py tests/test_settings.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit the citation gate**
+- [x] **Step 7: Commit the citation gate**
 
 ```bash
 git add knowledge/agent_runtime/context.py knowledge/agent_runtime/rag_tools.py knowledge/config/settings.py knowledge/api/app.py knowledge/agent_runtime/agent_factory.py .env.example tests/test_agent_context.py tests/test_agent_service.py tests/test_app_lifespan.py tests/test_settings.py

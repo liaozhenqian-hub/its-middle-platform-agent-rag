@@ -1,12 +1,14 @@
 import asyncio
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 from agents.tool_context import ToolContext
 
 from knowledge.agent_runtime.context import AgentRunContext
 from knowledge.agent_runtime.rag_tools import (
+    _citation_metadata,
     create_domain_evidence_tool,
     create_domain_rag_tool,
     create_scoped_rag_tool,
@@ -70,6 +72,25 @@ class SlowRegistry(FakeRegistry):
         return super().get(app_id, domain)
 
 
+def test_citation_metadata_marks_result_matching_a_query_identifier_as_exact():
+    item = SimpleNamespace(
+        chunk_id="opaque",
+        heading="WorkflowService.execute",
+        content="implementation",
+        metadata={"source_type": "code"},
+        retrieval_routes=("keyword",),
+        rerank_score=None,
+        fusion_score=0.03,
+        rank=1,
+    )
+    result = SimpleNamespace(
+        exact_identifiers=("WorkflowService.execute",),
+        rerank_applied=False,
+    )
+
+    assert _citation_metadata(item, result)["_retrieval"]["exact"] is True
+
+
 @pytest.mark.asyncio
 async def test_domain_rag_tool_has_fixed_scope_and_collects_private_citations():
     pipeline = FakePipeline()
@@ -108,6 +129,13 @@ async def test_domain_rag_tool_has_fixed_scope_and_collects_private_citations():
     assert payload["results"][0]["content"] == "供模型回答使用的知识正文"
     assert payload["results"][0]["retrieval_routes"] == ["keyword", "vector"]
     assert context.citations[0].source_id == "chunk-1"
+    assert context.citations[0].metadata["_retrieval"] == {
+        "exact": False,
+        "rerank_applied": False,
+        "rerank_score": None,
+        "fusion_score": 0.03,
+        "rank": 1,
+    }
     assert "content" not in context.to_dict()["citations"][0]
     assert context.tool_runs[0].status == "completed"
 

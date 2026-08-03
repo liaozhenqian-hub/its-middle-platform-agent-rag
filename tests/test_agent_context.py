@@ -115,6 +115,75 @@ def test_context_caps_public_citations_but_keeps_source_type_coverage():
     assert {item.source_type for item in citations} == {"mcp_tool", "code"}
 
 
+def test_public_citations_keep_only_strong_results_without_padding():
+    context = AgentRunContext("conversation", "run")
+    for source_id, score in (("strong-a", 0.91), ("strong-b", 0.73), ("weak", 0.12)):
+        context.add_knowledge_citation(
+            source_id,
+            source_id,
+            "Approval flow",
+            {
+                "source_type": "product_document",
+                "source_id": source_id,
+                "_retrieval": {
+                    "exact": False,
+                    "rerank_applied": True,
+                    "rerank_score": score,
+                    "fusion_score": 0.03,
+                    "rank": 1,
+                },
+            },
+        )
+
+    citations = context.public_citations(
+        5, min_rerank_score=0.35, min_rrf_score=0.02
+    )
+
+    assert [item.source_id for item in citations] == ["strong-a", "strong-b"]
+
+
+def test_public_citations_accept_exact_and_strict_rrf_fallback():
+    context = AgentRunContext("conversation", "run")
+    for source_id, retrieval in (
+        ("exact", {"exact": True, "rank": 3}),
+        (
+            "rrf",
+            {
+                "exact": False,
+                "rerank_applied": False,
+                "fusion_score": 0.021,
+                "rank": 2,
+            },
+        ),
+        (
+            "weak-rrf",
+            {
+                "exact": False,
+                "rerank_applied": False,
+                "fusion_score": 0.019,
+                "rank": 1,
+            },
+        ),
+    ):
+        context.add_knowledge_citation(
+            source_id,
+            source_id,
+            "Workflow",
+            {
+                "source_type": "code",
+                "relative_path": f"{source_id}.java",
+                "symbol_name": source_id,
+                "_retrieval": retrieval,
+            },
+        )
+
+    citations = context.public_citations(
+        5, min_rerank_score=0.35, min_rrf_score=0.02
+    )
+
+    assert [item.source_id for item in citations] == ["exact", "rrf"]
+
+
 def test_context_hides_same_title_code_and_document_duplicates_from_public_output():
     context = AgentRunContext("conversation-1", "run-1")
     for branch, path in (("develop", "A.java"), ("master", "B.java")):

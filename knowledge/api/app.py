@@ -678,6 +678,8 @@ def create_app(
             scope_repository=conversation_scopes,
             max_turns=settings.agent_max_turns,
             public_citation_limit=settings.agent_public_citation_limit,
+            citation_min_rerank_score=settings.agent_citation_min_rerank_score,
+            citation_min_rrf_score=settings.agent_citation_min_rrf_score,
             bug_graph_service=bug_graph_service,
             memory_service=memory_service,
             reasoning_synthesizer=manager_reasoning_synthesizer,

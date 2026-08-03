@@ -5,6 +5,7 @@ import pytest
 from agents.exceptions import ModelBehaviorError
 from agents import RunConfig
 
+from knowledge.agent_runtime.context import AgentRunContext
 from knowledge.agent_runtime.conversation_scopes import (
     ConversationScopeConflictError,
     ConversationScopeRepository,
@@ -341,6 +342,7 @@ class DuplicateCitationRunner(FakeRunner):
                     "branch": "develop",
                     "relative_path": "WorkflowService.java",
                     "symbol_name": "WorkflowService.run",
+                    "_retrieval": {"exact": True},
                 },
             )
         return FakeResult("根据代码证据回答")
@@ -604,6 +606,35 @@ async def test_agent_service_returns_deduplicated_citations(tmp_path):
     response = await service.chat("工作流怎么运行", "conversation-citations")
 
     assert [citation.source_id for citation in response.citations] == ["code-1"]
+
+
+def test_agent_service_applies_configured_public_citation_thresholds(tmp_path):
+    service = AgentService(
+        manager=object(),
+        model_factory=FakeModelFactory(),
+        session_factory=AgentSessionFactory(tmp_path / "agent.db", 50),
+        pending_runs=object(),
+        public_citation_limit=5,
+        citation_min_rerank_score=0.8,
+        citation_min_rrf_score=0.03,
+    )
+    context = AgentRunContext("conversation", "run")
+    context.add_knowledge_citation(
+        "weak",
+        "Weak result",
+        "Workflow",
+        {
+            "source_type": "code",
+            "relative_path": "Weak.java",
+            "_retrieval": {
+                "rerank_applied": True,
+                "rerank_score": 0.7,
+                "fusion_score": 0.04,
+            },
+        },
+    )
+
+    assert service._public_citations(context) == []
 
 
 @pytest.mark.asyncio

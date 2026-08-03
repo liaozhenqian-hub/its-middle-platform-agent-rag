@@ -27,6 +27,44 @@ def _record_retrieval_spans(context: AgentRunContext, result: Any) -> None:
         )
 
 
+def _citation_metadata(
+    item: Any,
+    result: Any | None,
+    *,
+    exact: bool = False,
+) -> dict[str, Any]:
+    metadata = dict(getattr(item, "metadata", None) or {})
+    exact_identifiers = set(getattr(result, "exact_identifiers", ()) or ())
+    routes = set(getattr(item, "retrieval_routes", ()) or ())
+    searchable = "\n".join(
+        str(value)
+        for value in (
+            getattr(item, "heading", None),
+            getattr(item, "content", None),
+            metadata.get("relative_path"),
+            metadata.get("symbol_name"),
+            metadata.get("bm25_keywords"),
+        )
+        if value
+    ).casefold()
+    identifier_match = any(
+        identifier.casefold().lstrip("/") in searchable
+        for identifier in exact_identifiers
+    )
+    metadata["_retrieval"] = {
+        "exact": bool(
+            exact
+            or identifier_match
+            or "exact_symbol" in routes
+        ),
+        "rerank_applied": bool(getattr(result, "rerank_applied", False)),
+        "rerank_score": getattr(item, "rerank_score", None),
+        "fusion_score": getattr(item, "fusion_score", None),
+        "rank": getattr(item, "rank", None),
+    }
+    return metadata
+
+
 def _code_branch_for_message(message: str) -> str | None:
     normalized = "".join(message.casefold().split())
     if any(marker in normalized for marker in ("开发环境", "开发", "develop", "dev", "测试环境", "测试", "test")):
@@ -96,7 +134,7 @@ def create_domain_rag_tool(
                     chunk_id=item.chunk_id,
                     heading=item.heading,
                     domain=domain,
-                    metadata=item.metadata,
+                    metadata=_citation_metadata(item, result),
                 )
                 payload_results.append(
                     {
@@ -204,7 +242,7 @@ def create_scoped_rag_tool(
                     chunk_id=item.chunk_id,
                     heading=item.heading,
                     domain=domain_name,
-                    metadata=item.metadata,
+                    metadata=_citation_metadata(item, result),
                 )
                 payload_results.append(
                     {
@@ -373,7 +411,7 @@ def create_domain_evidence_tool(
                 chunk_id=item.chunk_id,
                 heading=item.heading,
                 domain=domain_name,
-                metadata=item.metadata,
+                metadata=_citation_metadata(item, None, exact=True),
             )
             items.append(
                 {
@@ -392,7 +430,7 @@ def create_domain_evidence_tool(
                     chunk_id=item.chunk_id,
                     heading=item.heading,
                     domain=domain_name,
-                    metadata=item.metadata,
+                    metadata=_citation_metadata(item, search_result),
                 )
                 items.append(
                     {

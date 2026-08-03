@@ -91,6 +91,8 @@ class AgentService:
         intent_router: Any | None = None,
         intent_router_min_confidence: float = 0.75,
         public_citation_limit: int = 10,
+        citation_min_rerank_score: float = 0.35,
+        citation_min_rrf_score: float = 0.02,
         evidence_policy: EvidencePolicy | None = None,
         request_guard: RequestGuard | None = None,
         bug_graph_service: Any | None = None,
@@ -102,6 +104,8 @@ class AgentService:
         self.intent_router = intent_router
         self.intent_router_min_confidence = intent_router_min_confidence
         self.public_citation_limit = public_citation_limit
+        self.citation_min_rerank_score = citation_min_rerank_score
+        self.citation_min_rrf_score = citation_min_rrf_score
         self.evidence_policy = evidence_policy or EvidencePolicy()
         self.request_guard = request_guard or RequestGuard()
         self.bug_graph_service = bug_graph_service
@@ -116,6 +120,13 @@ class AgentService:
         self.scope_repository = scope_repository
         self._locks: dict[str, asyncio.Lock] = {}
         self._locks_guard = asyncio.Lock()
+
+    def _public_citations(self, context: AgentRunContext) -> list[Citation]:
+        return context.public_citations(
+            self.public_citation_limit,
+            min_rerank_score=self.citation_min_rerank_score,
+            min_rrf_score=self.citation_min_rrf_score,
+        )
 
     async def chat(
         self,
@@ -339,7 +350,7 @@ class AgentService:
                         )
                     )
                     answer_stream = PublicAnswerStream(
-                        lambda: context.public_citations(self.public_citation_limit)
+                        lambda: self._public_citations(context)
                     )
                     streamed_diagnosis = False
                     while not diagnosis_task.done() or not diagnosis_deltas.empty():
@@ -401,7 +412,7 @@ class AgentService:
             tool_names: dict[str, str] = {}
             buffered_manager_deltas: list[str] = []
             public_answer_stream = PublicAnswerStream(
-                lambda: context.public_citations(self.public_citation_limit)
+                lambda: self._public_citations(context)
             )
             active_specialist_calls: set[str] = set()
             specialist_invoked = False
@@ -514,7 +525,7 @@ class AgentService:
                     synthesis_task = asyncio.create_task(
                         self._synthesize_answer(
                             str(streamed.final_output),
-                            context.public_citations(self.public_citation_limit),
+                            self._public_citations(context),
                             context,
                             on_delta=collect_synthesis_delta,
                         )
@@ -761,7 +772,7 @@ class AgentService:
                 run_id=run_id,
                 answer=None,
                 last_agent=result.last_agent.name,
-                citations=context.public_citations(self.public_citation_limit),
+                citations=self._public_citations(context),
                 tool_runs=context.tool_runs,
                 approvals=context.approvals,
                 routed_domains=list(context.routing_domains),
@@ -770,7 +781,7 @@ class AgentService:
                 quality_spans=list(context.runtime_spans),
             )
 
-        citations = context.public_citations(self.public_citation_limit)
+        citations = self._public_citations(context)
         answer = answer_override if answer_override is not None else str(result.final_output)
         if context.response_override is not None:
             answer = context.response_override
@@ -875,7 +886,7 @@ class AgentService:
             call_id=call_id or f"bug-direct-{context.run_id}",
             on_diagnosis_delta=on_diagnosis_delta,
         )
-        citations = context.public_citations(self.public_citation_limit)
+        citations = self._public_citations(context)
         return AgentRunResponse(
             status="completed",
             conversation_id=context.conversation_id,

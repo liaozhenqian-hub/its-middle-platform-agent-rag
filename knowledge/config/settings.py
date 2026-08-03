@@ -276,10 +276,21 @@ class Settings(BaseSettings):
         alias="AGENT_RETRIEVAL_TIMEOUT_SECONDS",
     )
     agent_public_citation_limit: int = Field(
-        default=10,
+        default=5,
         ge=1,
         le=50,
         alias="AGENT_PUBLIC_CITATION_LIMIT",
+    )
+    agent_citation_min_rerank_score: float = Field(
+        default=0.35,
+        ge=0,
+        le=1,
+        alias="AGENT_CITATION_MIN_RERANK_SCORE",
+    )
+    agent_citation_min_rrf_score: float = Field(
+        default=0.02,
+        ge=0,
+        alias="AGENT_CITATION_MIN_RRF_SCORE",
     )
     agent_session_db: Path = Field(
         default=Path("storage/agent_sessions.db"),

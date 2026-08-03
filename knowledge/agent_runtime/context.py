@@ -168,15 +168,77 @@ class AgentRunContext:
         self.retrieval_call_count += 1
         return "allowed"
 
-    def public_citations(self, max_count: int) -> list[Citation]:
-        """Return stable, logically deduplicated citations for public responses."""
+    def public_citations(
+        self,
+        max_count: int,
+        *,
+        min_rerank_score: float | None = None,
+        min_rrf_score: float | None = None,
+    ) -> list[Citation]:
+        """Return the strongest logically distinct citations for public responses."""
         if max_count <= 0:
             return []
+
+        quality_gate_enabled = (
+            min_rerank_score is not None and min_rrf_score is not None
+        )
+
+        def quality(citation: Citation) -> tuple[bool, bool, float, float, int]:
+            retrieval = citation.metadata.get("_retrieval")
+            if not isinstance(retrieval, dict):
+                retrieval = {}
+            deterministic = citation.source_type in {
+                "mcp_tool",
+                "swagger",
+                "log_trace",
+            }
+            exact = deterministic or bool(retrieval.get("exact"))
+            rerank_applied = bool(retrieval.get("rerank_applied"))
+            try:
+                rerank_score = float(retrieval.get("rerank_score"))
+            except (TypeError, ValueError):
+                rerank_score = float("-inf")
+            try:
+                fusion_score = float(retrieval.get("fusion_score") or 0.0)
+            except (TypeError, ValueError):
+                fusion_score = 0.0
+            try:
+                rank = int(retrieval.get("rank") or 1_000_000)
+            except (TypeError, ValueError):
+                rank = 1_000_000
+            eligible = True
+            if quality_gate_enabled and citation.source_type in {
+                "code",
+                "product_document",
+            }:
+                eligible = (
+                    exact
+                    or (rerank_applied and rerank_score >= float(min_rerank_score))
+                    or (
+                        not rerank_applied
+                        and fusion_score >= float(min_rrf_score)
+                    )
+                )
+            return eligible, exact, rerank_score, fusion_score, rank
+
+        candidates = list(self.citations)
+        if quality_gate_enabled:
+            candidates = [
+                citation for citation in candidates if quality(citation)[0]
+            ]
+            candidates.sort(
+                key=lambda citation: (
+                    not quality(citation)[1],
+                    -quality(citation)[2],
+                    -quality(citation)[3],
+                    quality(citation)[4],
+                )
+            )
 
         unique: list[Citation] = []
         seen: set[tuple[Any, ...]] = set()
         public_titles: set[tuple[str, str]] = set()
-        for citation in self.citations:
+        for citation in candidates:
             metadata = citation.metadata
             if citation.source_type == "code":
                 key = (

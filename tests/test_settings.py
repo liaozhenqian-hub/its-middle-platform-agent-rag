@@ -209,7 +209,9 @@ def test_settings_exposes_agent_reliability_defaults():
     assert settings.agent_intent_router_min_confidence == 0.75
     assert settings.agent_retrieval_max_calls == 4
     assert settings.agent_retrieval_max_identical_queries == 1
-    assert settings.agent_public_citation_limit == 10
+    assert settings.agent_public_citation_limit == 5
+    assert settings.agent_citation_min_rerank_score == 0.35
+    assert settings.agent_citation_min_rrf_score == 0.02
     assert settings.metric_query_guard_enabled is True
     assert settings.grafana_log_max_range_minutes == 1440
 
