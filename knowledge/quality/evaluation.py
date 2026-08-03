@@ -267,6 +267,18 @@ class QualityEvaluationService:
     ) -> list[dict[str, Any]]:
         excerpt_by_id: dict[str, str] = {}
         if self.evidence_repository is not None:
+            anchors_by_id: dict[str, list[str]] = {}
+            for citation in citations[:10]:
+                source_id = str(getattr(citation, "source_id", "") or "")
+                metadata = dict(getattr(citation, "metadata", None) or {})
+                anchors = [
+                    str(getattr(citation, "title", "") or ""),
+                    str(metadata.get("symbol_name") or ""),
+                    str(metadata.get("heading") or ""),
+                ]
+                anchors_by_id[source_id] = [
+                    anchor for anchor in anchors if anchor.strip()
+                ]
             chunk_ids = list(
                 dict.fromkeys(
                     str(getattr(citation, "source_id", "") or "")
@@ -285,7 +297,10 @@ class QualityEvaluationService:
                 except Exception:
                     chunks = []
                 excerpt_by_id = {
-                    str(chunk.chunk_id): self._sanitize_excerpt(str(chunk.content))
+                    str(chunk.chunk_id): self._sanitize_excerpt(
+                        str(chunk.content),
+                        anchors=anchors_by_id.get(str(chunk.chunk_id), []),
+                    )
                     for chunk in chunks
                 }
 
@@ -308,7 +323,7 @@ class QualityEvaluationService:
             )
         return summaries
 
-    def _sanitize_excerpt(self, value: str) -> str:
+    def _sanitize_excerpt(self, value: str, *, anchors: list[str]) -> str:
         sanitized = re.sub(
             r"(?i)\bBearer\s+[^\s,;]+",
             "Bearer [REDACTED]",
@@ -319,4 +334,21 @@ class QualityEvaluationService:
             r"\1\2[REDACTED]",
             sanitized,
         )
-        return sanitized[: self.evidence_excerpt_max_chars]
+        lowered = sanitized.casefold()
+        match_index = -1
+        for anchor in anchors:
+            candidates = (anchor.strip(), anchor.rsplit(".", 1)[-1].strip())
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                match_index = lowered.find(candidate.casefold())
+                if match_index >= 0:
+                    break
+            if match_index >= 0:
+                break
+        start = (
+            max(0, match_index - self.evidence_excerpt_max_chars // 4)
+            if match_index >= 0
+            else 0
+        )
+        return sanitized[start : start + self.evidence_excerpt_max_chars]

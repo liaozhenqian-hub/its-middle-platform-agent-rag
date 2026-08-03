@@ -243,7 +243,11 @@ async def test_semantic_judge_receives_bounded_redacted_evidence_excerpts(tmp_pa
                 KnowledgeChunk(
                     chunk_id="code-1",
                     heading="Timeout handler",
-                    content="Authorization: Bearer private-token " + ("timeout handling " * 100),
+                    content=(
+                        "Authorization: Bearer private-token "
+                        + ("irrelevant prefix " * 100)
+                        + " TimeoutHandler.handle timeout handling"
+                    ),
                     metadata={"source_type": "code"},
                 )
             ]
@@ -261,9 +265,23 @@ async def test_semantic_judge_receives_bounded_redacted_evidence_excerpts(tmp_pa
             }
 
     judge = Judge()
+
+    class EvidenceAgent:
+        async def chat(self, message, conversation_id=None, **kwargs):
+            return FakeResponse(
+                conversation_id=conversation_id,
+                citations=[
+                    CitationSnapshot(
+                        source_type="code",
+                        source_id="code-1",
+                        title="TimeoutHandler.handle",
+                    )
+                ],
+            )
+
     evaluator = QualityEvaluationService(
         repository=repository,
-        agent_service=FakeAgentService(),
+        agent_service=EvidenceAgent(),
         application_version="0.2.0",
         provider="deepseek",
         model_name="deepseek-v4-flash",
@@ -275,7 +293,7 @@ async def test_semantic_judge_receives_bounded_redacted_evidence_excerpts(tmp_pa
     result = await evaluator.run_cases([case.id])
 
     assert result.passed_cases == 1
-    excerpt = judge.payload["evidence"][1]["excerpt"]
+    excerpt = judge.payload["evidence"][0]["excerpt"]
     assert "timeout handling" in excerpt
     assert len(excerpt) <= 200
     assert "private-token" not in excerpt

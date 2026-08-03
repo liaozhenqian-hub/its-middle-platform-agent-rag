@@ -389,7 +389,7 @@ class Settings(BaseSettings):
         alias="AGENT_QUALITY_JUDGE_MODEL",
     )
     agent_quality_judge_timeout_seconds: float = Field(
-        default=20,
+        default=45,
         gt=0,
         le=120,
         alias="AGENT_QUALITY_JUDGE_TIMEOUT_SECONDS",

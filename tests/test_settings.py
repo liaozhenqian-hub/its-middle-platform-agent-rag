@@ -213,6 +213,7 @@ def test_settings_exposes_agent_reliability_defaults():
     assert settings.agent_citation_min_rerank_score == 0.35
     assert settings.agent_citation_min_rrf_score == 0.02
     assert settings.agent_quality_evidence_excerpt_max_chars == 1200
+    assert settings.agent_quality_judge_timeout_seconds == 45
     assert settings.metric_query_guard_enabled is True
     assert settings.grafana_log_max_range_minutes == 1440
 
