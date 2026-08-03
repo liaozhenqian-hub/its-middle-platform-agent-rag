@@ -64,10 +64,14 @@ def create_domain_rag_tool(
         ctx.context.start_tool(call_id, tool_name, agent_name, {"query": query})
         started_at = perf_counter()
         reservation = ctx.context.reserve_retrieval(
-            tool_name,
-            query,
-            max_calls,
-            max_identical_queries,
+            query=query,
+            app_id=app_id,
+            domain_id=domain,
+            source_type="knowledge",
+            branch=None,
+            task_type=ctx.context.task_type,
+            max_calls=max_calls,
+            max_identical_queries=max_identical_queries,
         )
         if reservation != "allowed":
             ctx.context.finish_tool(call_id, status="skipped", duration_ms=0.0)
@@ -158,11 +162,20 @@ def create_scoped_rag_tool(
         call_id = str(getattr(ctx, "tool_call_id", "") or f"{tool_name}-unknown")
         ctx.context.start_tool(call_id, tool_name, agent_name, {"query": query})
         started_at = perf_counter()
+        branch = (
+            _code_branch_for_message(ctx.context.current_user_message)
+            if source_type == "code"
+            else None
+        )
         reservation = ctx.context.reserve_retrieval(
-            tool_name,
-            query,
-            max_calls,
-            max_identical_queries,
+            query=query,
+            app_id=app_id,
+            domain_id=domain_id,
+            source_type=source_type,
+            branch=branch,
+            task_type=ctx.context.task_type,
+            max_calls=max_calls,
+            max_identical_queries=max_identical_queries,
         )
         if reservation != "allowed":
             ctx.context.finish_tool(call_id, status="skipped", duration_ms=0.0)
@@ -173,10 +186,8 @@ def create_scoped_rag_tool(
         try:
             pipeline = await asyncio.to_thread(registry.get, app_id, None)
             clauses = list(base_clauses)
-            if source_type == "code":
-                branch = _code_branch_for_message(ctx.context.current_user_message)
-                if branch is not None:
-                    clauses.append({"branch": branch})
+            if branch is not None:
+                clauses.append({"branch": branch})
             where = {"$and": clauses}
             result = await asyncio.to_thread(
                 pipeline.search,
@@ -240,11 +251,29 @@ def create_domain_evidence_tool(
     keyword_k: int = 20,
     vector_k: int = 20,
     final_k: int = 5,
-    max_calls: int = 3,
+    max_calls: int = 4,
     max_identical_queries: int = 1,
     retrieval_timeout_seconds: float = 20,
 ) -> FunctionTool:
     """Collect task-specific evidence while keeping scope and call count server-controlled."""
+
+    def reserve(
+        context: AgentRunContext,
+        *,
+        query: str,
+        source_type: str,
+        branch: str | None = None,
+    ) -> str:
+        return context.reserve_retrieval(
+            query=query,
+            app_id=app_id,
+            domain_id=domain_id,
+            source_type=source_type,
+            branch=branch,
+            task_type=context.task_type,
+            max_calls=max_calls,
+            max_identical_queries=max_identical_queries,
+        )
 
     async def search_modality(
         ctx: RunContextWrapper[AgentRunContext], query: str, source_type: str
@@ -254,6 +283,7 @@ def create_domain_evidence_tool(
             {"$or": [{"domain_id": domain_id}, {"domain_id": "shared"}]},
             {"source_type": source_type},
         ]
+        branch = None
         if source_type == "code":
             branch = _code_branch_for_message(ctx.context.current_user_message)
             if branch:
@@ -283,9 +313,20 @@ def create_domain_evidence_tool(
                 if len(referenced_types) >= 2:
                     break
             if referenced_types:
+                exact_reservation = reserve(
+                    ctx.context,
+                    query="exact symbol " + " ".join(referenced_types),
+                    source_type=source_type,
+                    branch=branch,
+                )
+                exact_lookup = (
+                    registry.repository.get_chunks
+                    if exact_reservation == "allowed"
+                    else lambda *_args: []
+                )
                 exact_type_chunks.extend(
                     await asyncio.to_thread(
-                        registry.repository.get_chunks,
+                        exact_lookup,
                         {
                             "$and": [
                                 *clauses,
@@ -301,16 +342,27 @@ def create_domain_evidence_tool(
                     )
                 )
                 if not exact_type_chunks:
+                    supplemental_query = " ".join(referenced_types) + " field definition"
+                    supplemental_allowed = reserve(
+                        ctx.context,
+                        query=supplemental_query,
+                        source_type=source_type,
+                        branch=branch,
+                    ) == "allowed"
+                    supplemental_search = (
+                        pipeline.search if supplemental_allowed else lambda *_args: result
+                    )
                     supplemental = await asyncio.to_thread(
-                        pipeline.search,
+                        supplemental_search,
                         " ".join(referenced_types) + " 字段定义",
                         min(keyword_k, 12),
                         min(vector_k, 12),
                         final_k,
                         {"$and": clauses},
                     )
-                    _record_retrieval_spans(ctx.context, supplemental)
-                    search_results.append(supplemental)
+                    if supplemental_allowed:
+                        _record_retrieval_spans(ctx.context, supplemental)
+                        search_results.append(supplemental)
         items: list[dict[str, Any]] = []
         seen_chunks: set[str] = set()
         for item in exact_type_chunks:
@@ -432,11 +484,16 @@ def create_domain_evidence_tool(
         skipped: list[dict[str, str]] = []
         allowed: list[str] = []
         for modality in modalities:
-            reservation = ctx.context.reserve_retrieval(
-                f"collect_domain_evidence:{modality}",
-                query,
-                max_calls,
-                max_identical_queries,
+            branch = (
+                _code_branch_for_message(ctx.context.current_user_message)
+                if modality == "code"
+                else None
+            )
+            reservation = reserve(
+                ctx.context,
+                query=query,
+                source_type=modality,
+                branch=branch,
             )
             if reservation == "allowed":
                 allowed.append(modality)
@@ -470,11 +527,10 @@ def create_domain_evidence_tool(
                 for item in evidence
             )
             if not has_evidence:
-                reservation = ctx.context.reserve_retrieval(
-                    "collect_domain_evidence:product_document",
-                    query,
-                    max_calls,
-                    max_identical_queries,
+                reservation = reserve(
+                    ctx.context,
+                    query=query,
+                    source_type="product_document",
                 )
                 if reservation == "allowed":
                     evidence.append(await execute("product_document"))

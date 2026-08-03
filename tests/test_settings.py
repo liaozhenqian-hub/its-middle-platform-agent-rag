@@ -207,7 +207,7 @@ def test_settings_exposes_agent_reliability_defaults():
     assert settings.agent_intent_router_enabled is True
     assert settings.agent_llm_router_enabled is True
     assert settings.agent_intent_router_min_confidence == 0.75
-    assert settings.agent_retrieval_max_calls == 3
+    assert settings.agent_retrieval_max_calls == 4
     assert settings.agent_retrieval_max_identical_queries == 1
     assert settings.agent_public_citation_limit == 10
     assert settings.metric_query_guard_enabled is True

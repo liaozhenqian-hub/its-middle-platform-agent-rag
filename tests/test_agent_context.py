@@ -13,6 +13,31 @@ def test_context_enforces_retrieval_budget_and_duplicate_queries():
     assert "current_user_message" not in serialized
 
 
+def test_context_deduplicates_across_tools_and_caps_four_distinct_retrievals():
+    context = AgentRunContext("conversation-1", "run-1")
+    base = {
+        "query": "SDK authentication",
+        "app_id": "middle-platform",
+        "domain_id": "metric-platform",
+        "branch": None,
+        "task_type": "how_to",
+        "max_calls": 4,
+    }
+
+    assert context.reserve_retrieval(source_type="product_document", **base) == "allowed"
+    assert context.reserve_retrieval(
+        source_type="product_document", **{**base, "query": " sdk  authentication! "}
+    ) == "duplicate"
+    assert context.reserve_retrieval(source_type="code", **base) == "allowed"
+    assert context.reserve_retrieval(source_type="swagger", **base) == "allowed"
+    assert context.reserve_retrieval(
+        source_type="product_document", **{**base, "query": "SDK setup"}
+    ) == "allowed"
+    assert context.reserve_retrieval(
+        source_type="code", **{**base, "query": "SDK setup"}
+    ) == "budget_exhausted"
+
+
 def test_context_aggregates_public_citations_by_logical_source():
     context = AgentRunContext("conversation-1", "run-1")
     context.add_knowledge_citation(

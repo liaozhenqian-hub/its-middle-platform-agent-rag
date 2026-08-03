@@ -157,7 +157,7 @@ git commit -m "feat: backfill pgvector document domains"
 - Test: `tests/test_agent_evidence_collection_budget.py`
 - Test: `tests/test_settings.py`
 
-- [ ] **Step 1: Write failing cross-tool deduplication tests**
+- [x] **Step 1: Write failing cross-tool deduplication tests**
 
 ```python
 def test_context_deduplicates_equivalent_queries_across_tool_names():
@@ -176,37 +176,37 @@ def test_context_deduplicates_equivalent_queries_across_tool_names():
 
 Also assert four distinct retrieval keys are allowed and the fifth returns `budget_exhausted`.
 
-- [ ] **Step 2: Run the focused context tests and verify RED**
+- [x] **Step 2: Run the focused context tests and verify RED**
 
 Run: `python -m pytest tests/test_agent_context.py -k retrieval -q`
 
 Expected: FAIL because the current signature includes tool name and lacks scope fields.
 
-- [ ] **Step 3: Implement a stable retrieval key**
+- [x] **Step 3: Implement a stable retrieval key**
 
 Use Unicode NFKC normalization, case folding, whitespace/punctuation removal, and the trusted scope fields. Keep signatures and counters run-local and excluded from serialization.
 
-- [ ] **Step 4: Write failing tests for nested supplemental searches**
+- [x] **Step 4: Write failing tests for nested supplemental searches**
 
 Create an API-contract pipeline whose first result references DTO types and whose exact lookup misses. Assert the supplemental pipeline search reserves another call, total actual searches never exceeds four, and the same normalized search cannot execute through a second tool entry point.
 
-- [ ] **Step 5: Run the evidence budget tests and verify RED**
+- [x] **Step 5: Run the evidence budget tests and verify RED**
 
 Run: `python -m pytest tests/test_agent_evidence_collection_budget.py tests/test_agent_rag_tools.py -q`
 
 Expected: FAIL because the supplemental code search is not independently reserved.
 
-- [ ] **Step 6: Route every actual search through one reservation helper**
+- [x] **Step 6: Route every actual search through one reservation helper**
 
 `search_modality`, supplemental DTO search, product fallback, Swagger inspection and legacy scoped tools must reserve before performing I/O. A duplicate returns existing evidence status; budget exhaustion returns a bounded audit result. Set the default maximum to four.
 
-- [ ] **Step 7: Run focused tests and verify GREEN**
+- [x] **Step 7: Run focused tests and verify GREEN**
 
 Run: `python -m pytest tests/test_agent_context.py tests/test_agent_evidence_collection_budget.py tests/test_agent_rag_tools.py tests/test_settings.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit the retrieval budget change**
+- [x] **Step 8: Commit the retrieval budget change**
 
 ```bash
 git add knowledge/agent_runtime/context.py knowledge/agent_runtime/rag_tools.py knowledge/config/settings.py .env.example tests/test_agent_context.py tests/test_agent_evidence_collection_budget.py tests/test_agent_rag_tools.py tests/test_settings.py

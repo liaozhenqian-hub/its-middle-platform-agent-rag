@@ -260,7 +260,7 @@ class Settings(BaseSettings):
         default=True, alias="AGENT_COMPOSITE_EVIDENCE_ENABLED"
     )
     agent_retrieval_max_calls: int = Field(
-        default=3,
+        default=4,
         ge=1,
         alias="AGENT_RETRIEVAL_MAX_CALLS",
     )

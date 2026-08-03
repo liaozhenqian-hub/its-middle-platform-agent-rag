@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-import re
 from typing import Any
+import unicodedata
 
 
 _PRIVATE_KEYS = {
@@ -126,14 +126,40 @@ class AgentRunContext:
 
     def reserve_retrieval(
         self,
-        tool_name: str,
-        query: str,
-        max_calls: int,
-        max_identical_queries: int,
+        *legacy_args: Any,
+        query: str | None = None,
+        app_id: str = "",
+        domain_id: str | None = None,
+        source_type: str | None = None,
+        branch: str | None = None,
+        task_type: str | None = None,
+        max_calls: int | None = None,
+        max_identical_queries: int = 1,
     ) -> str:
         """Reserve one retrieval call without persisting run-local query state."""
-        normalized_query = re.sub(r"[\W_]+", "", query.casefold(), flags=re.UNICODE)
-        signature = f"{tool_name}:{normalized_query}"
+        if legacy_args:
+            if len(legacy_args) != 4 or query is not None or max_calls is not None:
+                raise TypeError("Invalid reserve_retrieval arguments")
+            legacy_tool, query, max_calls, max_identical_queries = legacy_args
+            source_type = str(legacy_tool)
+        if query is None or max_calls is None:
+            raise TypeError("query and max_calls are required")
+
+        def normalize(value: str | None) -> str:
+            normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+            return "".join(character for character in normalized if character.isalnum())
+
+        signature = "\x1f".join(
+            normalize(value)
+            for value in (
+                query,
+                app_id,
+                domain_id,
+                source_type,
+                branch,
+                task_type,
+            )
+        )
         if self.retrieval_signatures.get(signature, 0) >= max_identical_queries:
             return "duplicate"
         if self.retrieval_call_count >= max_calls:

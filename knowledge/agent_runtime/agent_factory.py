@@ -190,7 +190,7 @@ class AgentFactory:
                 domain_id=domain_id,
                 domain_name=domain_name,
                 agent_name=agent_name,
-                max_calls=min(3, self.retrieval_max_calls),
+                max_calls=self.retrieval_max_calls,
                 max_identical_queries=self.retrieval_max_identical_queries,
                 retrieval_timeout_seconds=self.retrieval_timeout_seconds,
             )]

@@ -1,4 +1,5 @@
 from knowledge.agent_runtime.agent_factory import AgentFactory
+import knowledge.agent_runtime.agent_factory as agent_factory_module
 
 
 class FakeRegistry:
@@ -8,6 +9,25 @@ class FakeRegistry:
 
 class FakeMCP:
     pass
+
+
+def test_composite_evidence_receives_the_configured_four_call_budget(monkeypatch):
+    captured = {}
+
+    def create_tool(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(agent_factory_module, "create_domain_evidence_tool", create_tool)
+    factory = AgentFactory(
+        model="fake-model",
+        registry=FakeRegistry(),
+        retrieval_max_calls=4,
+    )
+
+    factory._specialist_tools(None, "approval-flow", "Approval flow", "Expert")
+
+    assert captured["max_calls"] == 4
 
 
 def test_agent_factory_builds_manager_with_domain_and_bug_specialists_as_tools():
