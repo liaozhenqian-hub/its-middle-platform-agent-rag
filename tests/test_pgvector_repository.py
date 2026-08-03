@@ -57,6 +57,18 @@ def test_embedding_dimension_is_validated_before_database_access():
         repository.upsert_with_embeddings([chunk("a", "A")], [[0.1, 0.2]])
 
 
+def test_pgvector_domain_column_prefers_stable_domain_id():
+    columns = PostgresVectorStoreRepository._normalized_columns(
+        {
+            "domain": "审批流",
+            "domain_id": "approval-flow",
+            "source_type": "product_document",
+        }
+    )
+
+    assert columns["domain"] == "approval-flow"
+
+
 def test_pgvector_pool_keeps_warmed_connections_for_configured_idle_window(monkeypatch):
     captured = {}
 

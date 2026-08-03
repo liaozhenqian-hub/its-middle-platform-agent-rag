@@ -31,7 +31,7 @@
 - Modify: `knowledge/repositories/postgres_vector_store_repository.py`
 - Test: `tests/test_pgvector_repository.py`
 
-- [ ] **Step 1: Write the failing normalization test**
+- [x] **Step 1: Write the failing normalization test**
 
 ```python
 def test_pgvector_domain_column_prefers_stable_domain_id():
@@ -43,13 +43,13 @@ def test_pgvector_domain_column_prefers_stable_domain_id():
     assert columns["domain"] == "approval-flow"
 ```
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run: `python -m pytest tests/test_pgvector_repository.py::test_pgvector_domain_column_prefers_stable_domain_id -q`
 
 Expected: FAIL because the current implementation returns the display name.
 
-- [ ] **Step 3: Implement the minimal normalization change**
+- [x] **Step 3: Implement the minimal normalization change**
 
 ```python
 "domain": PostgresVectorStoreRepository._text(
@@ -57,13 +57,13 @@ Expected: FAIL because the current implementation returns the display name.
 ),
 ```
 
-- [ ] **Step 4: Run repository tests and verify GREEN**
+- [x] **Step 4: Run repository tests and verify GREEN**
 
 Run: `python -m pytest tests/test_pgvector_repository.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit the normalization change**
+- [x] **Step 5: Commit the normalization change**
 
 ```bash
 git add knowledge/repositories/postgres_vector_store_repository.py tests/test_pgvector_repository.py
@@ -380,4 +380,3 @@ Record a release marker timestamp, run at least thirty representative single-dom
 - [ ] **Step 9: Run final verification and record evidence**
 
 Run backend tests, frontend tests/build, readiness, vector domain aggregates and Critical summaries again. Update the OpenSpec task only with observed counts and outcomes. If any gate fails, report the exact remaining failure class and do not claim readiness for expanded dev use.
-

@@ -525,7 +525,7 @@ class PostgresVectorStoreRepository:
         return {
             "app_id": PostgresVectorStoreRepository._text(metadata.get("app_id")),
             "domain": PostgresVectorStoreRepository._text(
-                metadata.get("domain") or metadata.get("domain_id")
+                metadata.get("domain_id") or metadata.get("domain")
             ),
             "source_id": PostgresVectorStoreRepository._text(metadata.get("source_id")),
             "source_type": PostgresVectorStoreRepository._text(metadata.get("source_type")),
