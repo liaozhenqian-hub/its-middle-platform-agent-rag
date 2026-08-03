@@ -721,6 +721,9 @@ def create_app(
                     "composite_evidence": settings.agent_composite_evidence_enabled,
                 },
                 evidence_repository=registry.repository,
+                evidence_excerpt_max_chars=(
+                    settings.agent_quality_evidence_excerpt_max_chars
+                ),
             )
             if quality_repository is not None
             else None

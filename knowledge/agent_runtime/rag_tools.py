@@ -506,7 +506,7 @@ def create_domain_evidence_tool(
         ctx.context.evidence_collection_domains.append(domain_id)
         task_type = ctx.context.task_type or "unknown"
         plans = {
-            "how_to": ["product_document"],
+            "how_to": ["product_document", "code"],
             "api_contract": ["code", "swagger"],
             "code_lookup": ["code"],
             "requirement_analysis": ["product_document", "code"],

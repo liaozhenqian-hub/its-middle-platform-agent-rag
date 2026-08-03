@@ -339,11 +339,16 @@ async def test_controlled_evidence_tool_uses_task_plan_and_three_call_budget():
     assert tool.name == "collect_domain_evidence"
     assert set(tool.params_json_schema["properties"]) == {"query"}
     assert payload["task_type"] == "how_to"
-    assert payload["executed_retrievals"] == ["product_document"]
-    assert len(pipeline.calls) == 1
+    assert payload["executed_retrievals"] == ["product_document", "code"]
+    assert len(pipeline.calls) == 2
     assert pipeline.calls[0]["where"]["$and"][1] == {"source_type": "product_document"}
-    assert context.retrieval_call_count == 1
+    assert pipeline.calls[1]["where"]["$and"][1] == {"source_type": "code"}
+    assert context.retrieval_call_count == 2
     assert [span.name for span in context.runtime_spans] == [
+        "retrieval.query_rewrite",
+        "retrieval.keyword_search",
+        "retrieval.vector_search",
+        "retrieval.rerank",
         "retrieval.query_rewrite",
         "retrieval.keyword_search",
         "retrieval.vector_search",

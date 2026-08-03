@@ -27,7 +27,7 @@ class QualityEvaluationService:
         judge_timeout_seconds: float = 30,
         run_config_snapshot: dict[str, Any] | None = None,
         evidence_repository: Any | None = None,
-        evidence_excerpt_max_chars: int = 2000,
+        evidence_excerpt_max_chars: int = 1200,
     ):
         self.repository = repository
         self.agent_service = agent_service
