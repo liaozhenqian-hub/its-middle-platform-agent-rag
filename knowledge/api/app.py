@@ -720,6 +720,7 @@ def create_app(
                     "direct_specialist": settings.agent_direct_specialist_enabled,
                     "composite_evidence": settings.agent_composite_evidence_enabled,
                 },
+                evidence_repository=registry.repository,
             )
             if quality_repository is not None
             else None

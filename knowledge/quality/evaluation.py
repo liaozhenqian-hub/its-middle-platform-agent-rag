@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
+import re
 from time import perf_counter
 from typing import Any
 from uuid import uuid4
@@ -25,6 +26,8 @@ class QualityEvaluationService:
         case_timeout_seconds: float = 120,
         judge_timeout_seconds: float = 30,
         run_config_snapshot: dict[str, Any] | None = None,
+        evidence_repository: Any | None = None,
+        evidence_excerpt_max_chars: int = 2000,
     ):
         self.repository = repository
         self.agent_service = agent_service
@@ -35,6 +38,8 @@ class QualityEvaluationService:
         self.case_timeout_seconds = case_timeout_seconds
         self.judge_timeout_seconds = judge_timeout_seconds
         self.run_config_snapshot = run_config_snapshot or {}
+        self.evidence_repository = evidence_repository
+        self.evidence_excerpt_max_chars = max(1, evidence_excerpt_max_chars)
 
     async def _select_cases(self, case_ids: list[str] | None) -> list[EvalCase]:
         available = await self.repository.list_eval_cases(enabled=True)
@@ -174,7 +179,7 @@ class QualityEvaluationService:
                         self.semantic_judge.judge(
                             question=case.question,
                             answer=answer,
-                            evidence=self._evidence_summaries(citations),
+                            evidence=await self._evidence_summaries(citations),
                             required_facts=case.required_facts,
                             forbidden_facts=case.forbidden_facts,
                         ),
@@ -257,16 +262,43 @@ class QualityEvaluationService:
             )
         return response
 
-    @staticmethod
-    def _evidence_summaries(citations: list[Any]) -> list[dict[str, Any]]:
+    async def _evidence_summaries(
+        self, citations: list[Any]
+    ) -> list[dict[str, Any]]:
+        excerpt_by_id: dict[str, str] = {}
+        if self.evidence_repository is not None:
+            chunk_ids = list(
+                dict.fromkeys(
+                    str(getattr(citation, "source_id", "") or "")
+                    for citation in citations[:10]
+                    if str(getattr(citation, "source_type", "") or "")
+                    in {"code", "product_document", "knowledge_chunk"}
+                    and str(getattr(citation, "source_id", "") or "")
+                )
+            )
+            if chunk_ids:
+                try:
+                    chunks = await asyncio.to_thread(
+                        self.evidence_repository.get_chunks,
+                        ids=chunk_ids,
+                    )
+                except Exception:
+                    chunks = []
+                excerpt_by_id = {
+                    str(chunk.chunk_id): self._sanitize_excerpt(str(chunk.content))
+                    for chunk in chunks
+                }
+
         summaries: list[dict[str, Any]] = []
         for citation in citations[:10]:
             metadata = dict(getattr(citation, "metadata", None) or {})
+            source_id = str(getattr(citation, "source_id", "") or "")
             summaries.append(
                 {
                     "source_type": str(getattr(citation, "source_type", "") or ""),
-                    "source_id": str(getattr(citation, "source_id", "") or "")[:300],
+                    "source_id": source_id[:300],
                     "title": str(getattr(citation, "title", "") or "")[:500],
+                    "excerpt": excerpt_by_id.get(source_id, ""),
                     "metadata": {
                         key: value
                         for key, value in metadata.items()
@@ -275,3 +307,16 @@ class QualityEvaluationService:
                 }
             )
         return summaries
+
+    def _sanitize_excerpt(self, value: str) -> str:
+        sanitized = re.sub(
+            r"(?i)\bBearer\s+[^\s,;]+",
+            "Bearer [REDACTED]",
+            value,
+        )
+        sanitized = re.sub(
+            r"(?i)\b(api[_-]?key|password|secret|token)(\s*[:=]\s*)[^\s,;]+",
+            r"\1\2[REDACTED]",
+            sanitized,
+        )
+        return sanitized[: self.evidence_excerpt_max_chars]
