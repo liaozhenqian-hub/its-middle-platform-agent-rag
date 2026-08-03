@@ -69,6 +69,81 @@ def test_pgvector_domain_column_prefers_stable_domain_id():
     assert columns["domain"] == "approval-flow"
 
 
+def test_product_document_domain_backfill_is_scoped_and_idempotent():
+    statements = []
+
+    class Result:
+        def __init__(self, *, one=None, rows=None, rowcount=0):
+            self._one = one
+            self._rows = rows or []
+            self.rowcount = rowcount
+
+        def fetchone(self):
+            return self._one
+
+        def fetchall(self):
+            return self._rows
+
+    class Transaction:
+        def __enter__(self):
+            statements.append("transaction:begin")
+
+        def __exit__(self, exc_type, *_args):
+            statements.append("transaction:rollback" if exc_type else "transaction:commit")
+
+    class Connection:
+        pending = 2
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def transaction(self):
+            return Transaction()
+
+        def execute(self, statement, params=None):
+            rendered = statement.as_string() if hasattr(statement, "as_string") else str(statement)
+            statements.append((rendered, params))
+            if "GROUP BY" in rendered:
+                return Result(rows=[("approval-flow", 2), ("workflow", 1)])
+            if rendered.lstrip().startswith("UPDATE"):
+                updated = self.pending
+                self.pending = 0
+                return Result(rowcount=updated)
+            return Result(one=(3, self.pending))
+
+    class Pool:
+        def __init__(self):
+            self.connection_instance = Connection()
+
+        def connection(self):
+            return self.connection_instance
+
+    repository = PostgresVectorStoreRepository(
+        pool=Pool(), collection_name="metric_platform_knowledge", embedding=None
+    )
+
+    preview = repository.backfill_document_domains(apply=False)
+    applied = repository.backfill_document_domains(apply=True)
+    repeated = repository.backfill_document_domains(apply=True)
+
+    assert (preview.total, preview.pending, preview.updated) == (3, 2, 0)
+    assert preview.by_domain == {"approval-flow": 2, "workflow": 1}
+    assert (applied.total, applied.pending, applied.updated) == (3, 0, 2)
+    assert (repeated.total, repeated.pending, repeated.updated) == (3, 0, 0)
+    update_sql = next(
+        item[0]
+        for item in statements
+        if isinstance(item, tuple) and item[0].lstrip().startswith("UPDATE")
+    )
+    assert "source_type = 'product_document'" in update_sql
+    assert "metadata ->> 'domain_id'" in update_sql
+    assert "content" not in update_sql
+    assert "embedding" not in update_sql
+
+
 def test_pgvector_pool_keeps_warmed_connections_for_configured_idle_window(monkeypatch):
     captured = {}
 

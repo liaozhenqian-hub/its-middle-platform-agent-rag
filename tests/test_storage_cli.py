@@ -19,6 +19,69 @@ def test_storage_cli_lists_safe_migration_commands():
     assert "verify-relational" in result.stdout
     assert "shadow-report" in result.stdout
     assert "migrate-checkpoints" in result.stdout
+    assert "backfill-document-domains" in result.stdout
+
+
+def test_backfill_document_domains_defaults_to_dry_run(monkeypatch):
+    calls = []
+
+    class Repository:
+        def backfill_document_domains(self, *, apply):
+            calls.append(apply)
+            return SimpleNamespace(
+                total=268,
+                pending=268,
+                updated=0,
+                by_domain={"approval-flow": 40},
+            )
+
+        def close(self):
+            calls.append("closed")
+
+    monkeypatch.setattr(storage_cli, "get_settings", lambda: SimpleNamespace(
+        chroma_collection_name="knowledge"
+    ))
+    monkeypatch.setattr(storage_cli, "_target", lambda *_args: Repository())
+
+    result = runner.invoke(storage_cli.app, ["backfill-document-domains"])
+
+    assert result.exit_code == 0
+    assert calls == [False, "closed"]
+    assert '"mode": "dry-run"' in result.stdout
+    assert '"pending": 268' in result.stdout
+    assert "content" not in result.stdout
+    assert "embedding" not in result.stdout
+
+
+def test_backfill_document_domains_requires_apply_for_writes(monkeypatch):
+    calls = []
+
+    class Repository:
+        def backfill_document_domains(self, *, apply):
+            calls.append(apply)
+            return SimpleNamespace(
+                total=268,
+                pending=0,
+                updated=268,
+                by_domain={"approval-flow": 40},
+            )
+
+        def close(self):
+            calls.append("closed")
+
+    monkeypatch.setattr(storage_cli, "get_settings", lambda: SimpleNamespace(
+        chroma_collection_name="knowledge"
+    ))
+    monkeypatch.setattr(storage_cli, "_target", lambda *_args: Repository())
+
+    result = runner.invoke(
+        storage_cli.app, ["backfill-document-domains", "--apply"]
+    )
+
+    assert result.exit_code == 0
+    assert calls == [True, "closed"]
+    assert '"mode": "apply"' in result.stdout
+    assert '"updated": 268' in result.stdout
 
 
 def test_vector_migration_is_dry_run_by_default(monkeypatch):

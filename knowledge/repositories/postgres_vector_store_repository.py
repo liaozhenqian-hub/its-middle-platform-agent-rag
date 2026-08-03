@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from hashlib import sha256
 from contextlib import contextmanager
 import re
@@ -30,6 +31,14 @@ _COLUMN_MAP = {
     "enabled": "enabled",
     "chunk_id": "id",
 }
+
+
+@dataclass(frozen=True)
+class DomainBackfillReport:
+    total: int
+    pending: int
+    updated: int
+    by_domain: dict[str, int]
 
 
 class _PostgresVectorBulkWriter:
@@ -477,6 +486,69 @@ class PostgresVectorStoreRepository:
             return int(
                 connection.execute(statement, (self.collection_name,)).fetchone()[0]
             )
+
+    def backfill_document_domains(self, *, apply: bool = False) -> DomainBackfillReport:
+        summary_statement = sql.SQL(
+            """
+            SELECT count(*), count(*) FILTER (
+                WHERE domain IS DISTINCT FROM NULLIF(metadata ->> 'domain_id', '')
+            )
+            FROM {}
+            WHERE collection_name = %s AND source_type = 'product_document'
+            """
+        ).format(self._qualified_table)
+        distribution_statement = sql.SQL(
+            """
+            SELECT NULLIF(metadata ->> 'domain_id', ''), count(*)
+            FROM {}
+            WHERE collection_name = %s AND source_type = 'product_document'
+            GROUP BY NULLIF(metadata ->> 'domain_id', '')
+            ORDER BY NULLIF(metadata ->> 'domain_id', '')
+            """
+        ).format(self._qualified_table)
+        update_statement = sql.SQL(
+            """
+            UPDATE {}
+            SET domain = NULLIF(metadata ->> 'domain_id', ''), updated_at = now()
+            WHERE collection_name = %s
+              AND source_type = 'product_document'
+              AND NULLIF(metadata ->> 'domain_id', '') IS NOT NULL
+              AND domain IS DISTINCT FROM NULLIF(metadata ->> 'domain_id', '')
+            """
+        ).format(self._qualified_table)
+
+        with self.pool.connection() as connection:
+            with connection.transaction():
+                total, pending = connection.execute(
+                    summary_statement, (self.collection_name,)
+                ).fetchone()
+                distribution = connection.execute(
+                    distribution_statement, (self.collection_name,)
+                ).fetchall()
+                updated = 0
+                if apply and pending:
+                    updated = int(
+                        connection.execute(
+                            update_statement, (self.collection_name,)
+                        ).rowcount
+                    )
+                    total, pending = connection.execute(
+                        summary_statement, (self.collection_name,)
+                    ).fetchone()
+                    if pending:
+                        raise RuntimeError(
+                            "Product document domain backfill verification failed"
+                        )
+
+        return DomainBackfillReport(
+            total=int(total),
+            pending=int(pending),
+            updated=updated,
+            by_domain={
+                str(domain_id or "unassigned"): int(count)
+                for domain_id, count in distribution
+            },
+        )
 
     def build_hnsw_index(self) -> None:
         index_name = f"ix_{self.table}_embedding_hnsw"

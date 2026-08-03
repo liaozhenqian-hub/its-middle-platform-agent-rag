@@ -196,6 +196,31 @@ def migrate_vectors(
     _echo_json({"mode": "apply", "migrated_counts": _migrate_vector_collections()})
 
 
+@app.command("backfill-document-domains")
+def backfill_document_domains(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Copy stable product-document domain IDs from metadata into the indexed column.",
+    ),
+) -> None:
+    settings = get_settings()
+    repository = _target(settings, settings.chroma_collection_name)
+    try:
+        report = repository.backfill_document_domains(apply=apply)
+    finally:
+        repository.close()
+    _echo_json(
+        {
+            "mode": "apply" if apply else "dry-run",
+            "total": report.total,
+            "pending": report.pending,
+            "updated": report.updated,
+            "by_domain": report.by_domain,
+        }
+    )
+
+
 @app.command("migrate-relational")
 def migrate_relational(
     apply: bool = typer.Option(False, "--apply", help="Write SQLite business rows to PostgreSQL."),

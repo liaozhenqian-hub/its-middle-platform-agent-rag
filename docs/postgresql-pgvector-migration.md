@@ -86,6 +86,25 @@ python -m knowledge.storage_cli build-vector-index --apply
 python -m knowledge.storage_cli shadow-report
 ```
 
+### Product document domain repair
+
+Preview the scoped repair before changing data:
+
+```powershell
+python -m knowledge.storage_cli backfill-document-domains
+```
+
+Apply it once, then run the preview again. The second preview must report
+`pending=0` before enabling pgvector reads:
+
+```powershell
+python -m knowledge.storage_cli backfill-document-domains --apply
+python -m knowledge.storage_cli backfill-document-domains
+```
+
+The command only reports aggregate counts by stable domain ID. It does not
+read or print document content, embeddings, chunk IDs, or source IDs.
+
 本地 Telepresence 只用于连通性、正确性和断点续传验证。正式迁移耗时必须在 dev Pod 内直连数据库复测，不能用 Telepresence 的延迟判断 15 分钟窗口是否达标。
 
 ## 临时 Schema 演练

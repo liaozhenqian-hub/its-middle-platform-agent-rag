@@ -79,7 +79,7 @@ git commit -m "fix: normalize pgvector document domains"
 - Test: `tests/test_pgvector_repository.py`
 - Test: `tests/test_storage_cli.py`
 
-- [ ] **Step 1: Write failing repository tests for preview and apply**
+- [x] **Step 1: Write failing repository tests for preview and apply**
 
 ```python
 def test_product_document_domain_backfill_is_scoped_and_idempotent():
@@ -96,13 +96,13 @@ def test_product_document_domain_backfill_is_scoped_and_idempotent():
 
 The fake cursor must assert that the SQL scopes by collection and `source_type='product_document'`, assigns `metadata ->> 'domain_id'`, and never selects content, embedding, ID, or complete source identifiers.
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 Run: `python -m pytest tests/test_pgvector_repository.py -k document_domain_backfill -q`
 
 Expected: FAIL because the method and report type do not exist.
 
-- [ ] **Step 3: Implement the report and transactional repository method**
+- [x] **Step 3: Implement the report and transactional repository method**
 
 ```python
 @dataclass(frozen=True)
@@ -115,7 +115,7 @@ class DomainBackfillReport:
 
 The method performs aggregate preview queries and, when `apply=True`, executes the scoped update in one transaction before rechecking mismatch count. A nonzero mismatch after apply raises and rolls back.
 
-- [ ] **Step 4: Write failing CLI tests**
+- [x] **Step 4: Write failing CLI tests**
 
 ```python
 def test_backfill_document_domains_defaults_to_dry_run(monkeypatch):
@@ -129,17 +129,17 @@ def test_backfill_document_domains_requires_apply_for_writes(monkeypatch):
     assert '"mode": "apply"' in result.stdout
 ```
 
-- [ ] **Step 5: Implement the CLI and documentation**
+- [x] **Step 5: Implement the CLI and documentation**
 
 The CLI creates the configured knowledge pgvector repository without an Embedding client, calls the backfill method, closes the pool, and emits only mode and aggregate report fields.
 
-- [ ] **Step 6: Run focused tests and verify GREEN**
+- [x] **Step 6: Run focused tests and verify GREEN**
 
 Run: `python -m pytest tests/test_pgvector_repository.py tests/test_storage_cli.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit the backfill implementation**
+- [x] **Step 7: Commit the backfill implementation**
 
 ```bash
 git add knowledge/repositories/postgres_vector_store_repository.py knowledge/storage_cli.py tests/test_pgvector_repository.py tests/test_storage_cli.py docs/postgresql-pgvector-migration.md
