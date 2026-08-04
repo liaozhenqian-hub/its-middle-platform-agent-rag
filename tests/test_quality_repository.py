@@ -16,6 +16,50 @@ from knowledge.quality import (
 
 
 @pytest.mark.asyncio
+async def test_quality_repository_records_spans_as_one_batch(tmp_path):
+    repository = QualityRepository(tmp_path / "quality-batch.db")
+    await repository.initialize()
+    turn = await repository.start_turn(
+        TurnStart(run_id="run-batch", channel="codex", question="审批接口")
+    )
+
+    created = await repository.record_spans(
+        [
+            QualitySpanCreate(
+                turn_id=turn.id,
+                run_id=turn.run_id,
+                kind="llm",
+                name="审批流专家",
+                status="completed",
+                duration_ms=10,
+            ),
+            QualitySpanCreate(
+                turn_id=turn.id,
+                run_id=turn.run_id,
+                kind="tool",
+                name="collect_domain_evidence",
+                status="completed",
+                duration_ms=20,
+            ),
+        ]
+    )
+
+    assert [item.name for item in created] == [
+        "审批流专家",
+        "collect_domain_evidence",
+    ]
+    async with aiosqlite.connect(repository.database_path) as connection:
+        stored_count = (
+            await (
+                await connection.execute(
+                    "SELECT COUNT(*) FROM quality_spans WHERE turn_id=?", (turn.id,)
+                )
+            ).fetchone()
+        )[0]
+    assert stored_count == 2
+
+
+@pytest.mark.asyncio
 async def test_quality_repository_persists_spans_annotations_and_analytics(tmp_path):
     repository = QualityRepository(tmp_path / "quality-v2.db")
     await repository.initialize()

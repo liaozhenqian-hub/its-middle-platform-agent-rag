@@ -13,6 +13,7 @@ from rich.table import Table
 
 from knowledge.config.settings import get_settings
 from knowledge.config.logging_config import configure_logging
+from knowledge.repositories.vector_store_factory import create_vector_store_repository
 from knowledge.repositories.vector_store_repository import VectorStoreRepository
 from knowledge.services.ingestion_service import IngestionService
 from knowledge.services.hybrid_rerank_service import HybridRerankService
@@ -96,7 +97,9 @@ def ingest(
         dry_run,
     )
     settings = get_settings()
-    repository = None if dry_run else VectorStoreRepository.from_settings(settings)
+    repository = (
+        None if dry_run else create_vector_store_repository(settings)
+    )
     service = IngestionService(
         repository=repository,
         source_path=settings.knowledge_source_path,
@@ -146,7 +149,7 @@ def search(
         name,
         k,
     )
-    repository = VectorStoreRepository.from_settings()
+    repository = create_vector_store_repository()
     results = RetrievalService(repository).search(
         query=query,
         k=k,
@@ -207,7 +210,7 @@ def multi_search(
 
     # multi-search 是完整多路召回入口，因此这里 require_embedding=True：
     # 后面 vector route 需要把用户 query 转成 embedding 后再查 Chroma。
-    repository = VectorStoreRepository.from_settings(settings)
+    repository = create_vector_store_repository(settings)
 
     # BM25 关键词召回服务。
     # 初始化时会读取当前 app_id/domain/name 范围内的 metadata，
@@ -326,7 +329,10 @@ def stats() -> None:
     started_at = perf_counter()
     logger.info("Stats started")
     settings = get_settings()
-    repository = VectorStoreRepository.from_settings(settings, require_embedding=False)
+    repository = create_vector_store_repository(
+        settings,
+        require_embedding=False,
+    )
     count = repository.count()
     logger.info(
         "Stats completed collection=%s count=%d duration_ms=%.2f",
@@ -448,7 +454,7 @@ def memory_rebuild_index(
 
     memories = asyncio.run(load_memories())
     if apply:
-        vectors = VectorStoreRepository.from_settings(
+        vectors = create_vector_store_repository(
             settings,
             collection_name=settings.memory_chroma_collection_name,
         )

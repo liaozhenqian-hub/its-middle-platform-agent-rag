@@ -88,6 +88,7 @@ async function send() {
   prompt.value = "";
   followOutput.value = true;
   await store.sendMessage(value);
+  await history.load("", 1);
 }
 
 async function rate(message: ChatMessage, rating: "positive" | "negative") {

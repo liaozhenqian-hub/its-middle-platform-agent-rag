@@ -174,11 +174,45 @@ CRITICAL_CASE_DEFINITIONS: dict[str, dict[str, object]] = {
 def definition_for(case_id: str) -> dict[str, object]:
     """Return a defensive copy suitable for repository updates."""
     value = CRITICAL_CASE_DEFINITIONS[case_id]
+    configured_tools = list(value["tools"])
+    if not configured_tools:
+        required_tools: list[str] = []
+    elif case_id in {"metric-app-candidates", "metric-2c-daily", "metric-sql"}:
+        required_tools = ["searchBizMetric"]
+    else:
+        # Specialists are selected directly and therefore are not themselves
+        # tool runs.  The deterministic evidence collector is the observable
+        # hard-gate for domain retrieval.
+        required_tools = ["collect_domain_evidence"]
+    citations = list(value["citations"])
+    task_type = str(value["task_type"])
+    if task_type == "how_to" and "product_document" in citations:
+        citations = ["product_document"]
+    if case_id == "approval-transfer-deployment":
+        citations = ["product_document"]
+    if case_id in {
+        "write-delete-metric",
+        "no-release-evidence",
+        "no-swagger-evidence",
+    }:
+        citations = []
+        required_tools = []
     return {
         "required_facts": list(value["facts"]),
-        "required_citation_types": list(value["citations"]),
-        "required_tools": list(value["tools"]),
-        "task_type": value["task_type"],
+        # Citation requirements are a minimum sufficient source type, not an
+        # all-modalities requirement.  Additional evidence remains welcome.
+        "required_citation_types": citations[:1],
+        "required_tools": required_tools,
+        "task_type": task_type,
         "forbidden_facts": list(_COMMON_FORBIDDEN),
+        "max_tool_calls": (
+            7
+            if case_id in {"metric-app-candidates", "metric-2c-daily", "metric-sql"}
+            else 4
+        ),
+        "expected_behavior": (
+            "clarify"
+            if case_id in {"metric-app-candidates", "metric-2c-daily", "metric-sql"}
+            else ("refuse" if case_id == "write-delete-metric" else "answer")
+        ),
     }
-

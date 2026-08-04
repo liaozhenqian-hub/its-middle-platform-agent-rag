@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
+import re
 from time import perf_counter
 from typing import Any
 from uuid import uuid4
@@ -25,6 +26,8 @@ class QualityEvaluationService:
         case_timeout_seconds: float = 120,
         judge_timeout_seconds: float = 30,
         run_config_snapshot: dict[str, Any] | None = None,
+        evidence_repository: Any | None = None,
+        evidence_excerpt_max_chars: int = 5000,
     ):
         self.repository = repository
         self.agent_service = agent_service
@@ -35,6 +38,8 @@ class QualityEvaluationService:
         self.case_timeout_seconds = case_timeout_seconds
         self.judge_timeout_seconds = judge_timeout_seconds
         self.run_config_snapshot = run_config_snapshot or {}
+        self.evidence_repository = evidence_repository
+        self.evidence_excerpt_max_chars = max(1, evidence_excerpt_max_chars)
 
     async def _select_cases(self, case_ids: list[str] | None) -> list[EvalCase]:
         available = await self.repository.list_eval_cases(enabled=True)
@@ -123,9 +128,11 @@ class QualityEvaluationService:
             )
             duration_ms = (perf_counter() - started_at) * 1000
             answer = str(getattr(response, "answer", None) or "")
+            tool_runs = list(getattr(response, "tool_runs", None) or [])
             tool_names = [
                 str(getattr(item, "tool_name", "") or "")
-                for item in list(getattr(response, "tool_runs", None) or [])
+                for item in tool_runs
+                if str(getattr(item, "status", "") or "") != "skipped"
             ]
             citations = list(getattr(response, "citations", None) or [])
             citation_types = [
@@ -159,13 +166,20 @@ class QualityEvaluationService:
             judge_score: float | None = None
             review_state = "not_required"
             passed = not failure_codes
-            if passed and self.semantic_judge is not None:
+            # Refusal and clarification cases are deterministic behavior/safety
+            # gates.  Sending them to a factual evidence judge adds cost and can
+            # turn a correct no-citation refusal into judge_error.
+            if (
+                passed
+                and self.semantic_judge is not None
+                and case.expected_behavior == "answer"
+            ):
                 try:
                     judge = await asyncio.wait_for(
                         self.semantic_judge.judge(
                             question=case.question,
                             answer=answer,
-                            evidence=self._evidence_summaries(citations),
+                            evidence=await self._evidence_summaries(citations),
                             required_facts=case.required_facts,
                             forbidden_facts=case.forbidden_facts,
                         ),
@@ -248,16 +262,58 @@ class QualityEvaluationService:
             )
         return response
 
-    @staticmethod
-    def _evidence_summaries(citations: list[Any]) -> list[dict[str, Any]]:
+    async def _evidence_summaries(
+        self, citations: list[Any]
+    ) -> list[dict[str, Any]]:
+        excerpt_by_id: dict[str, str] = {}
+        if self.evidence_repository is not None:
+            anchors_by_id: dict[str, list[str]] = {}
+            for citation in citations[:10]:
+                source_id = str(getattr(citation, "source_id", "") or "")
+                metadata = dict(getattr(citation, "metadata", None) or {})
+                anchors = [
+                    str(getattr(citation, "title", "") or ""),
+                    str(metadata.get("symbol_name") or ""),
+                    str(metadata.get("heading") or ""),
+                ]
+                anchors_by_id[source_id] = [
+                    anchor for anchor in anchors if anchor.strip()
+                ]
+            chunk_ids = list(
+                dict.fromkeys(
+                    str(getattr(citation, "source_id", "") or "")
+                    for citation in citations[:10]
+                    if str(getattr(citation, "source_type", "") or "")
+                    in {"code", "product_document", "knowledge_chunk"}
+                    and str(getattr(citation, "source_id", "") or "")
+                )
+            )
+            if chunk_ids:
+                try:
+                    chunks = await asyncio.to_thread(
+                        self.evidence_repository.get_chunks,
+                        ids=chunk_ids,
+                    )
+                except Exception:
+                    chunks = []
+                excerpt_by_id = {
+                    str(chunk.chunk_id): self._sanitize_excerpt(
+                        str(chunk.content),
+                        anchors=anchors_by_id.get(str(chunk.chunk_id), []),
+                    )
+                    for chunk in chunks
+                }
+
         summaries: list[dict[str, Any]] = []
         for citation in citations[:10]:
             metadata = dict(getattr(citation, "metadata", None) or {})
+            source_id = str(getattr(citation, "source_id", "") or "")
             summaries.append(
                 {
                     "source_type": str(getattr(citation, "source_type", "") or ""),
-                    "source_id": str(getattr(citation, "source_id", "") or "")[:300],
+                    "source_id": source_id[:300],
                     "title": str(getattr(citation, "title", "") or "")[:500],
+                    "excerpt": excerpt_by_id.get(source_id, ""),
                     "metadata": {
                         key: value
                         for key, value in metadata.items()
@@ -266,3 +322,33 @@ class QualityEvaluationService:
                 }
             )
         return summaries
+
+    def _sanitize_excerpt(self, value: str, *, anchors: list[str]) -> str:
+        sanitized = re.sub(
+            r"(?i)\bBearer\s+[^\s,;]+",
+            "Bearer [REDACTED]",
+            value,
+        )
+        sanitized = re.sub(
+            r"(?i)\b(api[_-]?key|password|secret|token)(\s*[:=]\s*)[^\s,;]+",
+            r"\1\2[REDACTED]",
+            sanitized,
+        )
+        lowered = sanitized.casefold()
+        match_index = -1
+        for anchor in anchors:
+            candidates = (anchor.strip(), anchor.rsplit(".", 1)[-1].strip())
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                match_index = lowered.find(candidate.casefold())
+                if match_index >= 0:
+                    break
+            if match_index >= 0:
+                break
+        start = (
+            max(0, match_index - self.evidence_excerpt_max_chars // 4)
+            if match_index >= 0
+            else 0
+        )
+        return sanitized[start : start + self.evidence_excerpt_max_chars]

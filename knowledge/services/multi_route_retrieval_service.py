@@ -1,4 +1,5 @@
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from time import perf_counter
 from typing import Any, Protocol
@@ -12,6 +13,7 @@ from knowledge.schemas.documents import (
 from knowledge.services.keyword_retrieval_service import KeywordRetrievalService
 from knowledge.services.query_identifiers import extract_exact_identifiers
 from knowledge.services.hybrid_rerank_service import HybridRerankService
+from knowledge.services.provider_circuit import NonRetryableProviderCircuit
 
 
 logger = logging.getLogger(__name__)
@@ -42,11 +44,17 @@ class MultiRouteRetrievalService:
         keyword_service: KeywordRetrievalService,
         query_rewriter: QueryRewriter | None = None,
         hybrid_ranker: HybridRanker | None = None,
+        parallel_routes_enabled: bool = True,
+        provider_failure_cooldown_seconds: float = 60.0,
     ):
         self.repository = repository
         self.keyword_service = keyword_service
         self.query_rewriter = query_rewriter
         self.hybrid_ranker = hybrid_ranker or HybridRerankService()
+        self.parallel_routes_enabled = parallel_routes_enabled
+        self.vector_circuit = NonRetryableProviderCircuit(
+            provider_failure_cooldown_seconds
+        )
 
     def search(
         self,
@@ -97,35 +105,59 @@ class MultiRouteRetrievalService:
         if exact_identifiers:
             additional_queries.append(" ".join(exact_identifiers))
 
-        # 第三步：关键词召回。
-        # keyword_service 内部会自动叠加 app_id/domain/name 的数据隔离条件；
-        # where 则是调用方额外传入的 metadata 过滤条件，例如 {"chunk_type": "faq"}。
-        started = perf_counter()
-        keyword_results = self.keyword_service.search(
-            query,
-            k=keyword_k,
-            where=where,
-            additional_queries=additional_queries,
-        )
-        timings["keyword_search"] = (perf_counter() - started) * 1000
+        # 第三、四步：关键词与向量召回。查询改写完成后两路互不依赖，
+        # 因此默认并行执行；任一路失败时保留另一路证据。
+        def run_keyword_route():
+            route_started = perf_counter()
+            try:
+                results = self.keyword_service.search(
+                    query,
+                    k=keyword_k,
+                    where=where,
+                    additional_queries=additional_queries,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Keyword retrieval failed; continuing with vector results error_type=%s",
+                    type(exc).__name__,
+                )
+                results = []
+            return results, (perf_counter() - route_started) * 1000
 
-        # 第四步：向量召回。
-        # 向量检索只使用 rewrite.retrieval_query，因为向量更依赖完整语义表达；
-        # 同时也复用 keyword_service.build_where，保证两路召回的数据范围一致。
-        started = perf_counter()
-        try:
-            vector_results = self.repository.search(
-                rewrite.retrieval_query,
-                k=vector_k,
-                where=self.keyword_service.build_where(where),
-            )
-        except Exception as exc:
-            logger.warning(
-                "Vector retrieval failed; continuing with keyword results error_type=%s",
-                type(exc).__name__,
-            )
-            vector_results = []
-        timings["vector_search"] = (perf_counter() - started) * 1000
+        def run_vector_route():
+            route_started = perf_counter()
+            if not self.vector_circuit.allow():
+                return [], (perf_counter() - route_started) * 1000
+            try:
+                results = self.repository.search(
+                    rewrite.retrieval_query,
+                    k=vector_k,
+                    where=self.keyword_service.build_where(where),
+                )
+                self.vector_circuit.record_success()
+            except Exception as exc:
+                self.vector_circuit.record_failure(exc)
+                logger.warning(
+                    "Vector retrieval failed; continuing with keyword results error_type=%s",
+                    type(exc).__name__,
+                )
+                results = []
+            return results, (perf_counter() - route_started) * 1000
+
+        if self.parallel_routes_enabled:
+            with ThreadPoolExecutor(
+                max_workers=2,
+                thread_name_prefix="retrieval-route",
+            ) as executor:
+                keyword_future = executor.submit(run_keyword_route)
+                vector_future = executor.submit(run_vector_route)
+                keyword_results, keyword_elapsed = keyword_future.result()
+                vector_results, vector_elapsed = vector_future.result()
+        else:
+            keyword_results, keyword_elapsed = run_keyword_route()
+            vector_results, vector_elapsed = run_vector_route()
+        timings["keyword_search"] = keyword_elapsed
+        timings["vector_search"] = vector_elapsed
 
         # Chroma 返回的是通用 SearchResult，这里统一包装成 RouteSearchResult。
         # 这样后面的 hybrid_ranker 可以用同一种结构处理 keyword/vector 两路结果。

@@ -5,6 +5,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import aiosqlite
+from sqlalchemy import select, update, func
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+
+from knowledge.persistence.database import DatabaseResources
+from knowledge.persistence.schema import feishu_events
 
 
 _ERROR_TYPE_PATTERN = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -144,3 +149,84 @@ class _Connection:
             if exc_type is not None:
                 await self.connection.rollback()
             await self.connection.close()
+
+
+class PostgresFeishuEventRepository:
+    def __init__(self, database_resources: DatabaseResources):
+        self.database_resources = database_resources
+
+    async def initialize(self) -> None:
+        async with self.database_resources.transaction() as connection:
+            await connection.execute(
+                update(feishu_events)
+                .where(feishu_events.c.status == "processing")
+                .values(
+                    status="failed",
+                    error_type="ServiceRestart",
+                    updated_at=func.now(),
+                )
+            )
+
+    async def claim(self, event_id: str, message_id: str, chat_id: str) -> bool:
+        event_id = event_id.strip()
+        message_id = message_id.strip()
+        chat_id = chat_id.strip()
+        if not event_id or not message_id or not chat_id:
+            raise ValueError("event_id, message_id and chat_id are required")
+        async with self.database_resources.transaction() as connection:
+            inserted = (
+                await connection.execute(
+                    postgres_insert(feishu_events)
+                    .values(
+                        event_id=event_id,
+                        message_id=message_id,
+                        chat_id=chat_id,
+                        status="processing",
+                        attempt=1,
+                    )
+                    .on_conflict_do_nothing(index_elements=[feishu_events.c.event_id])
+                    .returning(feishu_events.c.event_id)
+                )
+            ).scalar_one_or_none()
+            if inserted is not None:
+                return True
+            retried = (
+                await connection.execute(
+                    update(feishu_events)
+                    .where(
+                        feishu_events.c.event_id == event_id,
+                        feishu_events.c.status == "failed",
+                        feishu_events.c.attempt < 2,
+                    )
+                    .values(
+                        message_id=message_id,
+                        chat_id=chat_id,
+                        status="processing",
+                        attempt=feishu_events.c.attempt + 1,
+                        error_type=None,
+                        updated_at=func.now(),
+                    )
+                    .returning(feishu_events.c.event_id)
+                )
+            ).scalar_one_or_none()
+        return retried is not None
+
+    async def complete(self, event_id: str) -> None:
+        await self._set_status(event_id, "completed", None)
+
+    async def fail(self, event_id: str, error_type: str) -> None:
+        sanitized = _ERROR_TYPE_PATTERN.sub("", str(error_type))[:100] or "Error"
+        await self._set_status(event_id, "failed", sanitized)
+
+    async def _set_status(
+        self, event_id: str, status: str, error_type: str | None
+    ) -> None:
+        async with self.database_resources.transaction() as connection:
+            await connection.execute(
+                update(feishu_events)
+                .where(
+                    feishu_events.c.event_id == event_id,
+                    feishu_events.c.status == "processing",
+                )
+                .values(status=status, error_type=error_type, updated_at=func.now())
+            )

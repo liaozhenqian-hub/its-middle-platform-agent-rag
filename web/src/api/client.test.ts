@@ -41,4 +41,26 @@ describe("API client", () => {
       expect.objectContaining<ApiError>({ status: 401, message: "session expired" }),
     );
   });
+
+  it("aborts a request that exceeds the client timeout", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_path: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        }),
+      ),
+    );
+    const client = createApiClient(() => null, 100);
+
+    const pending = client.get("/v1/knowledge/spaces");
+    const assertion = expect(pending).rejects.toThrow("请求超时，请稍后重试");
+    await vi.advanceTimersByTimeAsync(100);
+
+    await assertion;
+    vi.useRealTimers();
+  });
 });

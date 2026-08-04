@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-import re
 from typing import Any
+import unicodedata
 
 
 _PRIVATE_KEYS = {
@@ -107,6 +107,7 @@ class AgentRunContext:
     current_user_message: str = field(default="", repr=False, compare=False)
     metric_confirmation_token: str | None = None
     metric_confirmed_app: str | None = None
+    metric_query_stage: str = "discovering"
     citations: list[Citation] = field(default_factory=list)
     tool_runs: list[ToolRun] = field(default_factory=list)
     approvals: list[ApprovalRecord] = field(default_factory=list)
@@ -117,17 +118,48 @@ class AgentRunContext:
         compare=False,
     )
     retrieval_call_count: int = field(default=0, repr=False, compare=False)
+    evidence_collection_domains: list[str] = field(
+        default_factory=list,
+        repr=False,
+        compare=False,
+    )
 
     def reserve_retrieval(
         self,
-        tool_name: str,
-        query: str,
-        max_calls: int,
-        max_identical_queries: int,
+        *legacy_args: Any,
+        query: str | None = None,
+        app_id: str = "",
+        domain_id: str | None = None,
+        source_type: str | None = None,
+        branch: str | None = None,
+        task_type: str | None = None,
+        max_calls: int | None = None,
+        max_identical_queries: int = 1,
     ) -> str:
         """Reserve one retrieval call without persisting run-local query state."""
-        normalized_query = re.sub(r"[\W_]+", "", query.casefold(), flags=re.UNICODE)
-        signature = f"{tool_name}:{normalized_query}"
+        if legacy_args:
+            if len(legacy_args) != 4 or query is not None or max_calls is not None:
+                raise TypeError("Invalid reserve_retrieval arguments")
+            legacy_tool, query, max_calls, max_identical_queries = legacy_args
+            source_type = str(legacy_tool)
+        if query is None or max_calls is None:
+            raise TypeError("query and max_calls are required")
+
+        def normalize(value: str | None) -> str:
+            normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+            return "".join(character for character in normalized if character.isalnum())
+
+        signature = "\x1f".join(
+            normalize(value)
+            for value in (
+                query,
+                app_id,
+                domain_id,
+                source_type,
+                branch,
+                task_type,
+            )
+        )
         if self.retrieval_signatures.get(signature, 0) >= max_identical_queries:
             return "duplicate"
         if self.retrieval_call_count >= max_calls:
@@ -136,15 +168,93 @@ class AgentRunContext:
         self.retrieval_call_count += 1
         return "allowed"
 
-    def public_citations(self, max_count: int) -> list[Citation]:
-        """Return stable, logically deduplicated citations for public responses."""
+    def public_citations(
+        self,
+        max_count: int,
+        *,
+        min_rerank_score: float | None = None,
+        min_rrf_score: float | None = None,
+    ) -> list[Citation]:
+        """Return the strongest logically distinct citations for public responses."""
         if max_count <= 0:
             return []
+
+        quality_gate_enabled = (
+            min_rerank_score is not None and min_rrf_score is not None
+        )
+
+        def quality(citation: Citation) -> tuple[bool, bool, float, float, int]:
+            retrieval = citation.metadata.get("_retrieval")
+            if not isinstance(retrieval, dict):
+                retrieval = {}
+            deterministic = citation.source_type in {
+                "mcp_tool",
+                "swagger",
+                "log_trace",
+            }
+            exact = deterministic or bool(retrieval.get("exact"))
+            rerank_applied = bool(retrieval.get("rerank_applied"))
+            try:
+                rerank_score = float(retrieval.get("rerank_score"))
+            except (TypeError, ValueError):
+                rerank_score = float("-inf")
+            try:
+                fusion_score = float(retrieval.get("fusion_score") or 0.0)
+            except (TypeError, ValueError):
+                fusion_score = 0.0
+            try:
+                rank = int(retrieval.get("rank") or 1_000_000)
+            except (TypeError, ValueError):
+                rank = 1_000_000
+            eligible = True
+            if quality_gate_enabled and citation.source_type in {
+                "code",
+                "product_document",
+            }:
+                eligible = (
+                    exact
+                    or (rerank_applied and rerank_score >= float(min_rerank_score))
+                    or (
+                        not rerank_applied
+                        and fusion_score >= float(min_rrf_score)
+                    )
+                )
+            return eligible, exact, rerank_score, fusion_score, rank
+
+        candidates = list(self.citations)
+        if quality_gate_enabled:
+            candidates = [
+                citation for citation in candidates if quality(citation)[0]
+            ]
+            candidates.sort(
+                key=lambda citation: (
+                    not quality(citation)[1],
+                    -quality(citation)[2],
+                    -quality(citation)[3],
+                    quality(citation)[4],
+                )
+            )
+            supplemental = [
+                citation
+                for citation in candidates
+                if bool(
+                    (citation.metadata.get("_retrieval") or {}).get("supplemental")
+                )
+            ]
+            primary = [
+                citation
+                for citation in candidates
+                if not bool(
+                    (citation.metadata.get("_retrieval") or {}).get("supplemental")
+                )
+            ]
+            if supplemental and primary:
+                candidates = [*primary[:2], *supplemental, *primary[2:]]
 
         unique: list[Citation] = []
         seen: set[tuple[Any, ...]] = set()
         public_titles: set[tuple[str, str]] = set()
-        for citation in self.citations:
+        for citation in candidates:
             metadata = citation.metadata
             if citation.source_type == "code":
                 key = (
@@ -352,6 +462,7 @@ class AgentRunContext:
             task_type=str(data.get("task_type") or "unknown"),
             metric_confirmation_token=data.get("metric_confirmation_token"),
             metric_confirmed_app=data.get("metric_confirmed_app"),
+            metric_query_stage=str(data.get("metric_query_stage") or "discovering"),
             citations=[Citation(**item) for item in data.get("citations", [])],
             tool_runs=[ToolRun(**item) for item in data.get("tool_runs", [])],
             approvals=[ApprovalRecord(**item) for item in data.get("approvals", [])],

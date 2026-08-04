@@ -1,4 +1,5 @@
 from knowledge.agent_runtime.agent_factory import AgentFactory
+import knowledge.agent_runtime.agent_factory as agent_factory_module
 
 
 class FakeRegistry:
@@ -8,6 +9,25 @@ class FakeRegistry:
 
 class FakeMCP:
     pass
+
+
+def test_composite_evidence_receives_the_configured_four_call_budget(monkeypatch):
+    captured = {}
+
+    def create_tool(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(agent_factory_module, "create_domain_evidence_tool", create_tool)
+    factory = AgentFactory(
+        model="fake-model",
+        registry=FakeRegistry(),
+        retrieval_max_calls=4,
+    )
+
+    factory._specialist_tools(None, "approval-flow", "Approval flow", "Expert")
+
+    assert captured["max_calls"] == 4
 
 
 def test_agent_factory_builds_manager_with_domain_and_bug_specialists_as_tools():
@@ -61,7 +81,6 @@ def test_agent_factory_builds_manager_with_domain_and_bug_specialists_as_tools()
     metric = topology.specialists["metric_platform_expert"]
     assert metric.mcp_servers == [topology.metric_mcp_server]
     assert {tool.name for tool in metric.tools} == {
-        "search_metric_platform_knowledge",
         "collect_domain_evidence",
         "prepare_metric_query",
         "query_metric_data_guarded",
@@ -69,6 +88,9 @@ def test_agent_factory_builds_manager_with_domain_and_bug_specialists_as_tools()
     }
     approval = topology.specialists["approval_flow_expert"]
     workflow = topology.specialists["workflow_expert"]
+    assert "布尔条件中的 AND、OR 和提前返回" in approval.instructions
+    assert "对比问题" in approval.instructions
+    assert "未指定代码环境" in approval.instructions
     assert {tool.name for tool in approval.tools} == {
         "collect_domain_evidence",
     }
@@ -83,7 +105,6 @@ def test_agent_factory_omits_mcp_when_unavailable_but_keeps_metric_rag():
     metric = topology.specialists["metric_platform_expert"]
     assert metric.mcp_servers == []
     assert {tool.name for tool in metric.tools} == {
-        "search_metric_platform_knowledge",
         "collect_domain_evidence",
     }
     assert "bug_diagnosis_expert" not in {tool.name for tool in topology.manager.tools}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from time import perf_counter
 from typing import Any, Protocol
 
@@ -14,6 +15,63 @@ class PipelineRegistry(Protocol):
     def get(self, app_id: str, domain: str | None): ...
 
 
+_CONTRACT_TYPE_PATTERN = re.compile(
+    r"\b[A-Z][A-Za-z0-9]*(?:VO|DTO|Req|Resp|Request|Response)\b"
+)
+
+
+def _referenced_contract_types(result: Any, query: str, limit: int = 4) -> list[str]:
+    """Prefer request/response types adjacent to the retrieved method symbol."""
+    referenced: list[str] = []
+
+    def extend(value: str, *, reverse: bool = False) -> None:
+        matches = _CONTRACT_TYPE_PATTERN.findall(value)
+        if reverse:
+            matches.reverse()
+        for identifier in matches:
+            if identifier not in referenced and identifier not in query:
+                referenced.append(identifier)
+            if len(referenced) >= limit:
+                return
+
+    hits = sorted(
+        result.final_results,
+        key=lambda hit: (
+            0
+            if "." in str(getattr(hit, "heading", "") or "")
+            or "." in str((getattr(hit, "metadata", None) or {}).get("symbol_name") or "")
+            else 1
+        ),
+    )
+    for hit in hits:
+        content = str(hit.content or "")
+        metadata = dict(getattr(hit, "metadata", None) or {})
+        anchors = [
+            str(getattr(hit, "heading", "") or "").rsplit(".", 1)[-1],
+            str(metadata.get("symbol_name") or "").rsplit(".", 1)[-1],
+        ]
+        anchor_index = next(
+            (
+                content.casefold().find(anchor.casefold())
+                for anchor in anchors
+                if anchor and content.casefold().find(anchor.casefold()) >= 0
+            ),
+            -1,
+        )
+        if anchor_index >= 0:
+            extend(content[anchor_index : anchor_index + 1200])
+            if len(referenced) < limit:
+                extend(content[max(0, anchor_index - 400) : anchor_index], reverse=True)
+        if len(referenced) < limit:
+            extend(content)
+        if len(referenced) >= limit:
+            break
+    return sorted(
+        referenced,
+        key=lambda identifier: identifier.startswith("Api"),
+    )[:limit]
+
+
 def _record_retrieval_spans(context: AgentRunContext, result: Any) -> None:
     for stage, duration_ms in (getattr(result, "stage_timings_ms", None) or {}).items():
         context.runtime_spans.append(
@@ -24,6 +82,46 @@ def _record_retrieval_spans(context: AgentRunContext, result: Any) -> None:
                 duration_ms=max(0.0, float(duration_ms)),
             )
         )
+
+
+def _citation_metadata(
+    item: Any,
+    result: Any | None,
+    *,
+    exact: bool = False,
+    supplemental: bool = False,
+) -> dict[str, Any]:
+    metadata = dict(getattr(item, "metadata", None) or {})
+    exact_identifiers = set(getattr(result, "exact_identifiers", ()) or ())
+    routes = set(getattr(item, "retrieval_routes", ()) or ())
+    searchable = "\n".join(
+        str(value)
+        for value in (
+            getattr(item, "heading", None),
+            getattr(item, "content", None),
+            metadata.get("relative_path"),
+            metadata.get("symbol_name"),
+            metadata.get("bm25_keywords"),
+        )
+        if value
+    ).casefold()
+    identifier_match = any(
+        identifier.casefold().lstrip("/") in searchable
+        for identifier in exact_identifiers
+    )
+    metadata["_retrieval"] = {
+        "exact": bool(
+            exact
+            or identifier_match
+            or "exact_symbol" in routes
+        ),
+        **({"supplemental": True} if supplemental else {}),
+        "rerank_applied": bool(getattr(result, "rerank_applied", False)),
+        "rerank_score": getattr(item, "rerank_score", None),
+        "fusion_score": getattr(item, "fusion_score", None),
+        "rank": getattr(item, "rank", None),
+    }
+    return metadata
 
 
 def _code_branch_for_message(message: str) -> str | None:
@@ -63,10 +161,14 @@ def create_domain_rag_tool(
         ctx.context.start_tool(call_id, tool_name, agent_name, {"query": query})
         started_at = perf_counter()
         reservation = ctx.context.reserve_retrieval(
-            tool_name,
-            query,
-            max_calls,
-            max_identical_queries,
+            query=query,
+            app_id=app_id,
+            domain_id=domain,
+            source_type="knowledge",
+            branch=None,
+            task_type=ctx.context.task_type,
+            max_calls=max_calls,
+            max_identical_queries=max_identical_queries,
         )
         if reservation != "allowed":
             ctx.context.finish_tool(call_id, status="skipped", duration_ms=0.0)
@@ -75,7 +177,7 @@ def create_domain_rag_tool(
                 payload = {"status": "budget_exhausted", "max_calls": max_calls}
             return json.dumps(payload, ensure_ascii=False)
         try:
-            pipeline = registry.get(app_id, domain)
+            pipeline = await asyncio.to_thread(registry.get, app_id, domain)
             result = await asyncio.to_thread(
                 pipeline.search,
                 query,
@@ -91,7 +193,7 @@ def create_domain_rag_tool(
                     chunk_id=item.chunk_id,
                     heading=item.heading,
                     domain=domain,
-                    metadata=item.metadata,
+                    metadata=_citation_metadata(item, result),
                 )
                 payload_results.append(
                     {
@@ -157,11 +259,20 @@ def create_scoped_rag_tool(
         call_id = str(getattr(ctx, "tool_call_id", "") or f"{tool_name}-unknown")
         ctx.context.start_tool(call_id, tool_name, agent_name, {"query": query})
         started_at = perf_counter()
+        branch = (
+            _code_branch_for_message(ctx.context.current_user_message)
+            if source_type == "code"
+            else None
+        )
         reservation = ctx.context.reserve_retrieval(
-            tool_name,
-            query,
-            max_calls,
-            max_identical_queries,
+            query=query,
+            app_id=app_id,
+            domain_id=domain_id,
+            source_type=source_type,
+            branch=branch,
+            task_type=ctx.context.task_type,
+            max_calls=max_calls,
+            max_identical_queries=max_identical_queries,
         )
         if reservation != "allowed":
             ctx.context.finish_tool(call_id, status="skipped", duration_ms=0.0)
@@ -170,12 +281,10 @@ def create_scoped_rag_tool(
                 payload = {"status": "budget_exhausted", "max_calls": max_calls}
             return json.dumps(payload, ensure_ascii=False)
         try:
-            pipeline = registry.get(app_id, None)
+            pipeline = await asyncio.to_thread(registry.get, app_id, None)
             clauses = list(base_clauses)
-            if source_type == "code":
-                branch = _code_branch_for_message(ctx.context.current_user_message)
-                if branch is not None:
-                    clauses.append({"branch": branch})
+            if branch is not None:
+                clauses.append({"branch": branch})
             where = {"$and": clauses}
             result = await asyncio.to_thread(
                 pipeline.search,
@@ -192,7 +301,7 @@ def create_scoped_rag_tool(
                     chunk_id=item.chunk_id,
                     heading=item.heading,
                     domain=domain_name,
-                    metadata=item.metadata,
+                    metadata=_citation_metadata(item, result),
                 )
                 payload_results.append(
                     {
@@ -239,19 +348,39 @@ def create_domain_evidence_tool(
     keyword_k: int = 20,
     vector_k: int = 20,
     final_k: int = 5,
-    max_calls: int = 3,
+    max_calls: int = 4,
     max_identical_queries: int = 1,
+    retrieval_timeout_seconds: float = 20,
 ) -> FunctionTool:
     """Collect task-specific evidence while keeping scope and call count server-controlled."""
+
+    def reserve(
+        context: AgentRunContext,
+        *,
+        query: str,
+        source_type: str,
+        branch: str | None = None,
+    ) -> str:
+        return context.reserve_retrieval(
+            query=query,
+            app_id=app_id,
+            domain_id=domain_id,
+            source_type=source_type,
+            branch=branch,
+            task_type=context.task_type,
+            max_calls=max_calls,
+            max_identical_queries=max_identical_queries,
+        )
 
     async def search_modality(
         ctx: RunContextWrapper[AgentRunContext], query: str, source_type: str
     ) -> dict[str, Any]:
-        pipeline = registry.get(app_id, None)
+        pipeline = await asyncio.to_thread(registry.get, app_id, None)
         clauses: list[dict[str, Any]] = [
             {"$or": [{"domain_id": domain_id}, {"domain_id": "shared"}]},
             {"source_type": source_type},
         ]
+        branch = None
         if source_type == "code":
             branch = _code_branch_for_message(ctx.context.current_user_message)
             if branch:
@@ -261,26 +390,119 @@ def create_domain_evidence_tool(
             query,
             keyword_k,
             vector_k,
-            final_k,
+            max(final_k, 8)
+            if source_type == "code" and ctx.context.task_type == "api_contract"
+            else final_k,
             {"$and": clauses},
         )
         _record_retrieval_spans(ctx.context, result)
+        search_results = [result]
+        exact_type_chunks: list[Any] = []
+        if source_type == "code" and ctx.context.task_type == "api_contract":
+            referenced_types = _referenced_contract_types(result, query)
+            if referenced_types:
+                exact_reservation = reserve(
+                    ctx.context,
+                    query="exact symbol " + " ".join(referenced_types),
+                    source_type=source_type,
+                    branch=branch,
+                )
+                exact_lookup = (
+                    registry.repository.get_chunks
+                    if exact_reservation == "allowed"
+                    else lambda *_args: []
+                )
+                exact_type_chunks.extend(
+                    await asyncio.to_thread(
+                        exact_lookup,
+                        {
+                            "$and": [
+                                *clauses,
+                                {
+                                    "$or": [
+                                        {"symbol_name": identifier}
+                                        for identifier in referenced_types
+                                    ]
+                                },
+                            ]
+                        },
+                        None,
+                    )
+                )
+                if not exact_type_chunks:
+                    supplemental_query = " ".join(referenced_types) + " field definition"
+                    supplemental_allowed = reserve(
+                        ctx.context,
+                        query=supplemental_query,
+                        source_type=source_type,
+                        branch=branch,
+                    ) == "allowed"
+                    supplemental_search = (
+                        pipeline.search if supplemental_allowed else lambda *_args: result
+                    )
+                    supplemental = await asyncio.to_thread(
+                        supplemental_search,
+                        " ".join(referenced_types) + " 字段定义",
+                        min(keyword_k, 12),
+                        min(vector_k, 12),
+                        final_k,
+                        {"$and": clauses},
+                    )
+                    if supplemental_allowed:
+                        _record_retrieval_spans(ctx.context, supplemental)
+                        search_results.append(supplemental)
         items: list[dict[str, Any]] = []
-        for item in result.final_results:
+        seen_chunks: set[str] = set()
+        seen_exact_content: set[tuple[str, str]] = set()
+        for item in exact_type_chunks:
+            if item.chunk_id in seen_chunks:
+                continue
+            logical_key = (
+                str(item.heading or "").strip().casefold(),
+                str(item.content or "").strip(),
+            )
+            if logical_key in seen_exact_content:
+                continue
+            seen_exact_content.add(logical_key)
+            seen_chunks.add(item.chunk_id)
             ctx.context.add_knowledge_citation(
                 chunk_id=item.chunk_id,
                 heading=item.heading,
                 domain=domain_name,
-                metadata=item.metadata,
+                metadata=_citation_metadata(
+                    item,
+                    None,
+                    exact=True,
+                    supplemental=True,
+                ),
             )
             items.append(
                 {
                     "chunk_id": item.chunk_id,
                     "heading": item.heading,
                     "content": item.content,
-                    "retrieval_routes": list(item.retrieval_routes),
+                    "retrieval_routes": ["exact_symbol"],
                 }
             )
+        for search_result in search_results:
+            for item in search_result.final_results:
+                if item.chunk_id in seen_chunks:
+                    continue
+                seen_chunks.add(item.chunk_id)
+                ctx.context.add_knowledge_citation(
+                    chunk_id=item.chunk_id,
+                    heading=item.heading,
+                    domain=domain_name,
+                    metadata=_citation_metadata(item, search_result),
+                )
+                items.append(
+                    {
+                        "chunk_id": item.chunk_id,
+                        "heading": item.heading,
+                        "content": item.content,
+                        "retrieval_routes": list(item.retrieval_routes),
+                    }
+                )
         return {"source_type": source_type, "results": items}
 
     async def inspect_swagger(
@@ -334,9 +556,20 @@ def create_domain_evidence_tool(
             call_id, "collect_domain_evidence", agent_name, {"task_type": ctx.context.task_type}
         )
         started_at = perf_counter()
+        if domain_id in ctx.context.evidence_collection_domains:
+            ctx.context.finish_tool(call_id, status="skipped", duration_ms=0.0)
+            return json.dumps(
+                {
+                    "status": "duplicate_query",
+                    "reuse_existing_evidence": True,
+                    "domain_id": domain_id,
+                },
+                ensure_ascii=False,
+            )
+        ctx.context.evidence_collection_domains.append(domain_id)
         task_type = ctx.context.task_type or "unknown"
         plans = {
-            "how_to": ["product_document"],
+            "how_to": ["product_document", "code"],
             "api_contract": ["code", "swagger"],
             "code_lookup": ["code"],
             "requirement_analysis": ["product_document", "code"],
@@ -352,11 +585,16 @@ def create_domain_evidence_tool(
         skipped: list[dict[str, str]] = []
         allowed: list[str] = []
         for modality in modalities:
-            reservation = ctx.context.reserve_retrieval(
-                f"collect_domain_evidence:{modality}",
-                query,
-                max_calls,
-                max_identical_queries,
+            branch = (
+                _code_branch_for_message(ctx.context.current_user_message)
+                if modality == "code"
+                else None
+            )
+            reservation = reserve(
+                ctx.context,
+                query=query,
+                source_type=modality,
+                branch=branch,
             )
             if reservation == "allowed":
                 allowed.append(modality)
@@ -367,8 +605,18 @@ def create_domain_evidence_tool(
             executed.append(modality)
             try:
                 if modality == "swagger":
-                    return await inspect_swagger(ctx, query)
-                return await search_modality(ctx, query, modality)
+                    operation = inspect_swagger(ctx, query)
+                else:
+                    operation = search_modality(ctx, query, modality)
+                return await asyncio.wait_for(
+                    operation, timeout=retrieval_timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                return {
+                    "source_type": modality,
+                    "error": "retrieval_timeout",
+                    "timeout_seconds": retrieval_timeout_seconds,
+                }
             except Exception:
                 return {"source_type": modality, "error": "retrieval_unavailable"}
 
@@ -380,11 +628,10 @@ def create_domain_evidence_tool(
                 for item in evidence
             )
             if not has_evidence:
-                reservation = ctx.context.reserve_retrieval(
-                    "collect_domain_evidence:product_document",
-                    query,
-                    max_calls,
-                    max_identical_queries,
+                reservation = reserve(
+                    ctx.context,
+                    query=query,
+                    source_type="product_document",
                 )
                 if reservation == "allowed":
                     evidence.append(await execute("product_document"))

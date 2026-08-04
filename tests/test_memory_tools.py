@@ -13,8 +13,8 @@ class FakeMemoryService:
     def __init__(self):
         self.calls = []
 
-    async def recall(self, query, *, user_id, space_id, domain_id):
-        self.calls.append((query, user_id, space_id, domain_id))
+    async def recall(self, query, *, user_id, space_id, domain_id, scopes=None):
+        self.calls.append((query, user_id, space_id, domain_id, scopes))
         now = datetime.now(UTC)
         return [
             Memory(
@@ -64,7 +64,13 @@ async def test_memory_tools_use_server_scoped_identity_only():
     )
 
     assert service.calls == [
-        ("接口怎么对接", "user-1", "middle-platform", "approval-flow")
+        (
+            "接口怎么对接",
+            "user-1",
+            "middle-platform",
+            "approval-flow",
+            ("user",),
+        )
     ]
     assert json.loads(output)["memories"][0]["summary"] == "用户偏好接口回答包含入参与出参"
     assert set(user_tool.params_json_schema["properties"]) == {"query"}

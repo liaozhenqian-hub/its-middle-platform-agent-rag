@@ -9,6 +9,9 @@ from typing import AsyncIterator, Iterable
 
 import aiosqlite
 
+from knowledge.persistence.database import DatabaseResources
+from knowledge.persistence.sqlite_compat import PostgresCompatConnection
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -336,3 +339,17 @@ class EntityMemoryRepository:
     @staticmethod
     def _normalize(value: str) -> str:
         return "".join(str(value).casefold().split())[:500]
+
+
+class PostgresEntityMemoryRepository(EntityMemoryRepository):
+    def __init__(self, database_resources: DatabaseResources):
+        self.database_resources = database_resources
+
+    @asynccontextmanager
+    async def _connect(self):
+        async with PostgresCompatConnection(self.database_resources) as connection:
+            yield connection
+
+    async def initialize(self) -> None:
+        if not await self.database_resources.check_ready():
+            raise RuntimeError("PostgreSQL entity-memory repository is unavailable")

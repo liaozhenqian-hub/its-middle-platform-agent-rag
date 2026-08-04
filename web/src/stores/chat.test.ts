@@ -82,6 +82,48 @@ describe("chat scope", () => {
     expect(store.conversationId).toBeNull();
   });
 
+  it("falls back to a usable default scope when knowledge spaces cannot load", async () => {
+    mocks.get.mockRejectedValue(new Error("请求超时，请稍后重试"));
+    const store = useChatStore();
+
+    await store.restorePersistedConversation();
+
+    expect(store.restoringConversation).toBe(false);
+    expect(store.scope).toEqual({
+      knowledgeSpaceId: "middle-platform",
+      domainId: null,
+      label: "中台",
+    });
+  });
+
+  it("loads spaces and persisted conversation concurrently", async () => {
+    localStorage.setItem("middle-platform-agent.active-conversation", "c-history");
+    let resolveSpaces!: (value: unknown) => void;
+    let resolveDetail!: (value: unknown) => void;
+    mocks.get.mockImplementation((path: string) => new Promise((resolve) => {
+      if (path === "/v1/knowledge/spaces") resolveSpaces = resolve;
+      else resolveDetail = resolve;
+    }));
+    const store = useChatStore();
+
+    const restoring = store.restorePersistedConversation();
+    expect(mocks.get).toHaveBeenCalledTimes(2);
+    resolveSpaces([{ id: "middle-platform", name: "中台", domains: [] }]);
+    resolveDetail({
+      conversation_id: "c-history",
+      title: "历史会话",
+      channel: "web",
+      knowledge_space_id: "middle-platform",
+      domain_id: null,
+      created_at: "2026-07-30T00:00:00+00:00",
+      updated_at: "2026-07-30T00:00:00+00:00",
+      messages: [],
+    });
+    await restoring;
+
+    expect(store.conversationId).toBe("c-history");
+  });
+
   it("resets conversation state only when the selected scope changes", () => {
     const store = useChatStore();
     store.selectScope({ knowledgeSpaceId: "middle-platform", domainId: null, label: "中台" });
@@ -302,5 +344,19 @@ describe("chat scope", () => {
 
     expect(observed).toContain("逐");
     expect(observed).toContain("逐字");
+  });
+
+  it("replaces browser network errors with an actionable Chinese message", async () => {
+    mocks.stream.mockImplementation(async function* () {
+      throw new TypeError("network error");
+    });
+    const store = useChatStore();
+    store.selectScope({ knowledgeSpaceId: "middle-platform", domainId: null, label: "中台" });
+
+    await store.sendMessage("审批实例详情 operationSource 枚举值有哪些");
+
+    expect(store.error).toBe("网络连接已中断，请稍后重试。");
+    expect(store.messages[1].content).toBe("网络连接已中断，请稍后重试。");
+    expect(store.error).not.toContain("network error");
   });
 });

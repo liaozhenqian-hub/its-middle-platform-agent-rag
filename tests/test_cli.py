@@ -63,8 +63,8 @@ def test_vector_search_cli_requires_app_id():
 
 def test_multi_search_cli_displays_routes_separately(monkeypatch, caplog):
     monkeypatch.setattr(
-        cli.VectorStoreRepository,
-        "from_settings",
+        cli,
+        "create_vector_store_repository",
         lambda *args, **kwargs: CliRepository(),
     )
     monkeypatch.setattr(cli, "create_query_rewriter", lambda settings: None, raising=False)

@@ -10,6 +10,9 @@ from uuid import uuid4
 
 import aiosqlite
 
+from knowledge.persistence.database import DatabaseResources
+from knowledge.persistence.sqlite_compat import PostgresCompatConnection
+
 from knowledge.catalog.migrations import MIGRATIONS
 from knowledge.catalog.models import (
     AuditEvent,
@@ -156,6 +159,57 @@ class CatalogRepository:
             for row in rows
         ]
 
+    async def list_spaces_with_domains(
+        self,
+    ) -> list[tuple[KnowledgeSpace, list[KnowledgeDomain]]]:
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT
+                        s.id AS space_id,
+                        s.name AS space_name,
+                        s.created_at AS space_created_at,
+                        d.id AS domain_id,
+                        d.name AS domain_name,
+                        d.sort_order AS domain_sort_order,
+                        d.created_at AS domain_created_at
+                    FROM knowledge_spaces AS s
+                    LEFT JOIN knowledge_domains AS d ON d.space_id=s.id
+                    ORDER BY s.name, d.sort_order, d.id
+                    """
+                )
+            ).fetchall()
+        result: list[tuple[KnowledgeSpace, list[KnowledgeDomain]]] = []
+        by_space: dict[str, list[KnowledgeDomain]] = {}
+        for row in rows:
+            space_id = row["space_id"]
+            domains = by_space.get(space_id)
+            if domains is None:
+                domains = []
+                by_space[space_id] = domains
+                result.append(
+                    (
+                        KnowledgeSpace(
+                            id=space_id,
+                            name=row["space_name"],
+                            created_at=_from_iso(row["space_created_at"]),
+                        ),
+                        domains,
+                    )
+                )
+            if row["domain_id"] is not None:
+                domains.append(
+                    KnowledgeDomain(
+                        id=row["domain_id"],
+                        space_id=space_id,
+                        name=row["domain_name"],
+                        sort_order=int(row["domain_sort_order"]),
+                        created_at=_from_iso(row["domain_created_at"]),
+                    )
+                )
+        return result
+
     async def list_domains(self, space_id: str) -> list[KnowledgeDomain]:
         async with self._connect() as db:
             rows = await (
@@ -192,7 +246,7 @@ class CatalogRepository:
                     source.source_type.value,
                     source.name,
                     _json_dump(source.config),
-                    int(source.enabled),
+                    bool(source.enabled),
                     now,
                     now,
                 ),
@@ -233,7 +287,7 @@ class CatalogRepository:
             values.append(source_type.value)
         if enabled is not None:
             clauses.append("s.enabled=?")
-            values.append(int(enabled))
+            values.append(bool(enabled))
         sql = self._source_select()
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
@@ -260,7 +314,7 @@ class CatalogRepository:
             values.append(_json_dump(config))
         if enabled is not None:
             assignments.append("enabled=?")
-            values.append(int(enabled))
+            values.append(bool(enabled))
         values.append(source_id)
         async with self._connect() as db:
             cursor = await db.execute(
@@ -328,7 +382,7 @@ class CatalogRepository:
                     rule.source_id,
                     rule.pattern,
                     rule.target_domain_id,
-                    int(rule.shared),
+                    bool(rule.shared),
                     rule.priority,
                     now,
                 ),
@@ -404,7 +458,7 @@ class CatalogRepository:
                             source_id,
                             rule.pattern,
                             rule.target_domain_id,
-                            int(rule.shared),
+                            bool(rule.shared),
                             rule.priority,
                             now,
                         ),
@@ -438,7 +492,7 @@ class CatalogRepository:
                         version.source_id,
                         version.version_ref,
                         version.status,
-                        int(version.current),
+                        bool(version.current),
                         _json_dump(version.metadata),
                         now,
                         now,
@@ -505,7 +559,7 @@ class CatalogRepository:
                     values.append(status)
                 if current is not None:
                     assignments.append("current=?")
-                    values.append(int(current))
+                    values.append(bool(current))
                 if metadata is not None:
                     assignments.append("metadata_json=?")
                     values.append(_json_dump(metadata))
@@ -1469,3 +1523,50 @@ class CatalogRepository:
             details=_json_load(row["details_json"]),
             created_at=_from_iso(row["created_at"]),
         )
+
+
+class PostgresCatalogRepository(CatalogRepository):
+    def __init__(self, database_resources: DatabaseResources):
+        self.database_resources = database_resources
+
+    @asynccontextmanager
+    async def _connect(self):
+        async with PostgresCompatConnection(self.database_resources) as connection:
+            yield connection
+
+    async def initialize(self) -> None:
+        if not await self.database_resources.check_ready():
+            raise RuntimeError("PostgreSQL catalog repository is unavailable")
+
+    async def check_ready(self) -> bool:
+        return await self.database_resources.check_ready()
+
+    async def claim_next_job(
+        self, worker_id: str, *, now: datetime | None = None
+    ) -> SyncJob | None:
+        worker_id = worker_id.strip()
+        if not worker_id:
+            raise ValueError("worker_id must not be blank")
+        current = _to_iso(now or _utc_now())
+        async with self._connect() as db:
+            cursor = await db.execute(
+                """
+                WITH candidate AS (
+                    SELECT id FROM sync_jobs
+                    WHERE state='queued' AND available_at<=?
+                    ORDER BY available_at, created_at, id
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 1
+                )
+                UPDATE sync_jobs AS job
+                SET state='running', attempt=job.attempt+1, worker_id=?,
+                    claimed_at=?, finished_at=NULL, updated_at=?
+                FROM candidate
+                WHERE job.id=candidate.id
+                RETURNING job.*
+                """,
+                (current, worker_id, current, current),
+            )
+            row = await cursor.fetchone()
+            await db.commit()
+        return self._job_from_row(row) if row is not None else None

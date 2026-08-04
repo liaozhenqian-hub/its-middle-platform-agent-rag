@@ -5,9 +5,12 @@ from knowledge.schemas.documents import (
     KnowledgeChunk,
     QueryRewriteResult,
     SearchResult,
+    RouteSearchResult,
 )
 from knowledge.services.keyword_retrieval_service import KeywordRetrievalService
 from knowledge.services.multi_route_retrieval_service import MultiRouteRetrievalService
+from threading import Event
+from time import monotonic
 
 
 class DualRouteRepository:
@@ -89,6 +92,109 @@ class FailingVectorRepository(DualRouteRepository):
         raise RuntimeError("private provider error")
 
 
+class NonRetryableVectorRepository(DualRouteRepository):
+    def search(self, query, k=5, where=None):
+        self.vector_queries.append((query, k, where))
+        error = RuntimeError("provider rejected request")
+        error.status_code = 400
+        raise error
+
+
+class CoordinatedKeywordService:
+    app_id = "middle-platform"
+
+    def __init__(self, keyword_started: Event, vector_started: Event):
+        self.keyword_started = keyword_started
+        self.vector_started = vector_started
+
+    def build_where(self, where=None):
+        return where
+
+    def search(self, query, k=5, where=None, additional_queries=None):
+        self.keyword_started.set()
+        self.vector_started.wait(timeout=0.5)
+        return [
+            RouteSearchResult(
+                retrieval_route="keyword",
+                rank=1,
+                chunk_id="keyword",
+                heading="管理员转办",
+                content="关键词证据",
+                metadata={},
+                raw_score=1.0,
+                score_type="fielded_bm25",
+                higher_is_better=True,
+            )
+        ]
+
+
+class CoordinatedVectorRepository:
+    def __init__(self, keyword_started: Event, vector_started: Event):
+        self.keyword_started = keyword_started
+        self.vector_started = vector_started
+
+    def search(self, query, k=5, where=None):
+        self.vector_started.set()
+        self.keyword_started.wait(timeout=0.5)
+        return [
+            SearchResult(
+                chunk_id="vector",
+                content="向量证据",
+                metadata={"heading": "管理员转办接口"},
+                score=0.1,
+            )
+        ]
+
+
+class PassthroughRanker:
+    def rank(self, query, keyword_results, vector_results, top_k):
+        return HybridRankResult(results=[], rerank_applied=False)
+
+
+def test_keyword_and_vector_routes_run_in_parallel():
+    keyword_started = Event()
+    vector_started = Event()
+    service = MultiRouteRetrievalService(
+        CoordinatedVectorRepository(keyword_started, vector_started),
+        CoordinatedKeywordService(keyword_started, vector_started),
+        hybrid_ranker=PassthroughRanker(),
+    )
+
+    started = monotonic()
+    result = service.search("管理员转办")
+    elapsed = monotonic() - started
+
+    assert elapsed < 0.3
+    assert result.keyword_results[0].chunk_id == "keyword"
+    assert result.vector_results[0].chunk_id == "vector"
+
+
+def test_multi_route_search_falls_back_to_vector_when_bm25_fails(caplog):
+    class FailingKeywordService:
+        app_id = "middle-platform"
+
+        def build_where(self, where=None):
+            return where
+
+        def search(self, *args, **kwargs):
+            raise RuntimeError("private keyword error")
+
+    repository = DualRouteRepository()
+    service = MultiRouteRetrievalService(
+        repository,
+        FailingKeywordService(),
+    )
+
+    result = service.search("SDK 查询")
+
+    assert result.keyword_results == []
+    assert result.vector_results
+    assert result.final_results
+    assert result.final_results[0].retrieval_routes == ("vector",)
+    assert "Keyword retrieval failed; continuing with vector results" in caplog.text
+    assert "private keyword error" not in caplog.text
+
+
 def test_multi_route_search_falls_back_to_bm25_when_vector_query_fails(caplog):
     repository = FailingVectorRepository()
     keyword_service = KeywordRetrievalService(
@@ -106,6 +212,21 @@ def test_multi_route_search_falls_back_to_bm25_when_vector_query_fails(caplog):
     assert result.final_results[0].retrieval_routes == ("keyword",)
     assert "Vector retrieval failed; continuing with keyword results" in caplog.text
     assert "private provider error" not in caplog.text
+
+
+def test_multi_route_temporarily_skips_vector_after_non_retryable_provider_error():
+    repository = NonRetryableVectorRepository()
+    keyword_service = KeywordRetrievalService(
+        repository,
+        app_id="middle-platform",
+        domain="metric-platform",
+    )
+    service = MultiRouteRetrievalService(repository, keyword_service)
+
+    service.search("first query")
+    service.search("second query")
+
+    assert len(repository.vector_queries) == 1
 
 
 def test_multi_route_search_applies_required_scope_to_both_routes():

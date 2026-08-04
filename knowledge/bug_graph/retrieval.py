@@ -56,7 +56,7 @@ class PipelineBugCodeRetriever:
                     for chunk in chunks[: self.top_k]
                 ]
 
-        pipeline = self.registry.get(self.app_id, None)
+        pipeline = await asyncio.to_thread(self.registry.get, self.app_id, None)
         where = {
             "$and": [
                 {"source_type": "code"},

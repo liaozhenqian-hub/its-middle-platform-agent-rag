@@ -40,6 +40,7 @@ def create_memory_tools(service: MemoryService) -> tuple[FunctionTool, FunctionT
             user_id=context.user_id,
             space_id=context.knowledge_space_id,
             domain_id=context.domain_id,
+            scopes=("user",),
         )
         return json.dumps(
             {"status": "ok", "memories": [_public_memory(item) for item in memories]},
@@ -63,6 +64,7 @@ def create_memory_tools(service: MemoryService) -> tuple[FunctionTool, FunctionT
             user_id=None,
             space_id=context.knowledge_space_id,
             domain_id=context.domain_id,
+            scopes=("domain",),
         )
         return json.dumps(
             {"status": "ok", "memories": [_public_memory(item) for item in memories]},

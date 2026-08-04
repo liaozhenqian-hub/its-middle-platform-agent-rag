@@ -215,7 +215,7 @@ def create_bug_code_search_tool(
             )
         where = {"$and": where_clauses}
         try:
-            pipeline = registry.get(app_id, None)
+            pipeline = await asyncio.to_thread(registry.get, app_id, None)
             result = await asyncio.to_thread(
                 pipeline.search,
                 query,

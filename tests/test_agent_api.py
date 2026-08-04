@@ -155,6 +155,25 @@ def test_health_endpoints_report_degraded_optional_mcp():
     assert ready.json()["components"]["mcp"]["status"] == "unavailable"
 
 
+def test_readiness_accepts_provider_aware_postgres_and_pgvector_components():
+    application = create_app(
+        agent_service=FakeService(),
+        component_status={
+            "model": {"status": "available"},
+            "database": {"provider": "postgres", "status": "available"},
+            "vector_store": {"provider": "pgvector", "status": "available"},
+            "sqlite": {"status": "disabled"},
+            "chroma": {"status": "disabled"},
+            "mcp": {"status": "available"},
+        },
+    )
+
+    ready = TestClient(application).get("/health/ready")
+
+    assert ready.status_code == 200
+    assert ready.json()["status"] == "ready"
+
+
 def test_chat_accepts_scope_and_scope_conflicts_are_http_409_before_streaming():
     client, _ = build_client()
     body = {

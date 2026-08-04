@@ -13,6 +13,31 @@ def test_context_enforces_retrieval_budget_and_duplicate_queries():
     assert "current_user_message" not in serialized
 
 
+def test_context_deduplicates_across_tools_and_caps_four_distinct_retrievals():
+    context = AgentRunContext("conversation-1", "run-1")
+    base = {
+        "query": "SDK authentication",
+        "app_id": "middle-platform",
+        "domain_id": "metric-platform",
+        "branch": None,
+        "task_type": "how_to",
+        "max_calls": 4,
+    }
+
+    assert context.reserve_retrieval(source_type="product_document", **base) == "allowed"
+    assert context.reserve_retrieval(
+        source_type="product_document", **{**base, "query": " sdk  authentication! "}
+    ) == "duplicate"
+    assert context.reserve_retrieval(source_type="code", **base) == "allowed"
+    assert context.reserve_retrieval(source_type="swagger", **base) == "allowed"
+    assert context.reserve_retrieval(
+        source_type="product_document", **{**base, "query": "SDK setup"}
+    ) == "allowed"
+    assert context.reserve_retrieval(
+        source_type="code", **{**base, "query": "SDK setup"}
+    ) == "budget_exhausted"
+
+
 def test_context_aggregates_public_citations_by_logical_source():
     context = AgentRunContext("conversation-1", "run-1")
     context.add_knowledge_citation(
@@ -88,6 +113,113 @@ def test_context_caps_public_citations_but_keeps_source_type_coverage():
 
     assert len(citations) == 4
     assert {item.source_type for item in citations} == {"mcp_tool", "code"}
+
+
+def test_public_citations_keep_only_strong_results_without_padding():
+    context = AgentRunContext("conversation", "run")
+    for source_id, score in (("strong-a", 0.91), ("strong-b", 0.73), ("weak", 0.12)):
+        context.add_knowledge_citation(
+            source_id,
+            source_id,
+            "Approval flow",
+            {
+                "source_type": "product_document",
+                "source_id": source_id,
+                "_retrieval": {
+                    "exact": False,
+                    "rerank_applied": True,
+                    "rerank_score": score,
+                    "fusion_score": 0.03,
+                    "rank": 1,
+                },
+            },
+        )
+
+    citations = context.public_citations(
+        5, min_rerank_score=0.35, min_rrf_score=0.02
+    )
+
+    assert [item.source_id for item in citations] == ["strong-a", "strong-b"]
+
+
+def test_public_citations_accept_exact_and_strict_rrf_fallback():
+    context = AgentRunContext("conversation", "run")
+    for source_id, retrieval in (
+        ("exact", {"exact": True, "rank": 3}),
+        (
+            "rrf",
+            {
+                "exact": False,
+                "rerank_applied": False,
+                "fusion_score": 0.021,
+                "rank": 2,
+            },
+        ),
+        (
+            "weak-rrf",
+            {
+                "exact": False,
+                "rerank_applied": False,
+                "fusion_score": 0.019,
+                "rank": 1,
+            },
+        ),
+    ):
+        context.add_knowledge_citation(
+            source_id,
+            source_id,
+            "Workflow",
+            {
+                "source_type": "code",
+                "relative_path": f"{source_id}.java",
+                "symbol_name": source_id,
+                "_retrieval": retrieval,
+            },
+        )
+
+    citations = context.public_citations(
+        5, min_rerank_score=0.35, min_rrf_score=0.02
+    )
+
+    assert [item.source_id for item in citations] == ["exact", "rrf"]
+
+
+def test_public_citations_keep_primary_contract_hits_ahead_of_supplemental_types():
+    context = AgentRunContext("conversation", "run")
+    for index in range(4):
+        context.add_knowledge_citation(
+            f"dto-{index}",
+            f"RequestType{index}",
+            "Approval flow",
+            {
+                "source_type": "code",
+                "symbol_name": f"RequestType{index}",
+                "_retrieval": {"exact": True, "supplemental": True},
+            },
+        )
+    for index, score in enumerate((0.9, 0.8, 0.7)):
+        context.add_knowledge_citation(
+            f"method-{index}",
+            f"Controller.method{index}",
+            "Approval flow",
+            {
+                "source_type": "code",
+                "symbol_name": f"Controller.method{index}",
+                "_retrieval": {
+                    "exact": False,
+                    "supplemental": False,
+                    "rerank_applied": True,
+                    "rerank_score": score,
+                },
+            },
+        )
+
+    citations = context.public_citations(
+        5, min_rerank_score=0.35, min_rrf_score=0.02
+    )
+
+    assert [item.source_id for item in citations[:2]] == ["method-0", "method-1"]
+    assert len(citations) == 5
 
 
 def test_context_hides_same_title_code_and_document_duplicates_from_public_output():

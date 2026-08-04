@@ -22,6 +22,7 @@ from pathlib import Path
 import httpx
 from openai import AsyncOpenAI, OpenAI
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -129,11 +130,14 @@ from knowledge.memory.repository import MemoryRepository
 from knowledge.memory.service import MemoryService
 from knowledge.memory.summarizer import ConversationSummaryService
 from knowledge.memory.worker import MemoryExtractionWorker
+from knowledge.persistence.database import DatabaseResources
+from knowledge.persistence.postgres_urls import postgres_saver_url
+from knowledge.persistence.factory import RelationalRepositoryFactory
 from knowledge.history.service import (
     ConversationHistoryNotFound,
     ConversationHistoryService,
 )
-from knowledge.repositories.vector_store_repository import VectorStoreRepository
+from knowledge.repositories.vector_store_factory import create_vector_store_repository
 from knowledge.source_sync import (
     GitLabClient,
     GitRepositoryManager,
@@ -156,6 +160,55 @@ from knowledge.swagger.inspector import SwaggerInspector
 logger = logging.getLogger(__name__)
 
 
+async def _warm_registry(
+    registry: RetrievalPipelineRegistry,
+    scopes: list[tuple[str, str | None]],
+) -> None:
+    try:
+        await asyncio.to_thread(registry.warm, scopes)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning("Retrieval pipeline warmup failed", exc_info=True)
+
+
+def _start_registry_warmup(
+    registry: RetrievalPipelineRegistry,
+    scopes: list[tuple[str, str | None]],
+    *,
+    enabled: bool = True,
+) -> asyncio.Task[None] | None:
+    if not enabled:
+        return None
+    return asyncio.create_task(
+        _warm_registry(registry, scopes),
+        name="retrieval-pipeline-warmup",
+    )
+
+
+def _bm25_component(
+    registry: Any,
+    *,
+    enabled: bool,
+) -> dict[str, Any]:
+    if not enabled:
+        return {"status": "disabled", "cached_pipelines": 0}
+    warm_status = getattr(registry, "warm_status", None)
+    if not callable(warm_status):
+        return {"status": "unavailable", "cached_pipelines": 0}
+    try:
+        details = dict(warm_status())
+    except Exception:
+        return {"status": "unavailable", "cached_pipelines": 0}
+    status = details.get("status")
+    if status not in {"warming", "available", "unavailable"}:
+        status = "unavailable"
+    return {
+        "status": status,
+        "cached_pipelines": max(int(details.get("cached_pipelines", 0)), 0),
+    }
+
+
 def _build_manager_reasoning_synthesizer(
     settings: Settings,
     model_factory: AgentModelFactory,
@@ -171,6 +224,37 @@ def _build_manager_reasoning_synthesizer(
         run_config_factory=model_factory.create_run_config,
         timeout_seconds=settings.agent_manager_reasoning_timeout_seconds,
     )
+
+
+def _build_agent_session_factory(
+    settings: Settings,
+    database_resources: DatabaseResources,
+) -> AgentSessionFactory:
+    return AgentSessionFactory(
+        settings.resolved_agent_session_db,
+        settings.agent_session_history_limit,
+        provider=settings.data_store_provider,
+        database_resources=(
+            database_resources
+            if settings.data_store_provider == "postgres"
+            else None
+        ),
+    )
+
+
+def _bug_graph_saver_context(settings: Settings):
+    checkpoint_provider = settings.bug_graph_checkpoint_provider
+    use_postgres = checkpoint_provider == "postgres" or (
+        checkpoint_provider == "auto" and settings.data_store_provider == "postgres"
+    )
+    if use_postgres:
+        saver_url = postgres_saver_url(
+            settings.resolved_psycopg_url,
+            schema=settings.database_schema,
+        )
+        return AsyncPostgresSaver.from_conn_string(saver_url)
+    settings.resolved_bug_graph_db.parent.mkdir(parents=True, exist_ok=True)
+    return AsyncSqliteSaver.from_conn_string(str(settings.resolved_bug_graph_db))
 
 def _sse(event: dict[str, Any]) -> str:
     return (
@@ -235,12 +319,30 @@ def create_app(
 
         settings = Settings()
         configure_logging(settings)
+        database_resources = DatabaseResources(settings)
+        await database_resources.start()
+        application.state._runtime_cleanup.push_async_callback(
+            database_resources.close
+        )
+        postgres_ready = (
+            await database_resources.check_ready()
+            if database_resources.enabled
+            else False
+        )
+        relational_repositories = RelationalRepositoryFactory(
+            provider=settings.data_store_provider,
+            database_resources=(
+                database_resources
+                if settings.data_store_provider == "postgres"
+                else None
+            ),
+        )
         user_auth_service = None
         user_auth_repository = None
         user_auth_status = "disabled"
         if settings.user_auth_enabled:
             try:
-                user_auth_repository = UserAuthRepository(
+                user_auth_repository = relational_repositories.user_auth(
                     settings.resolved_user_auth_db
                 )
                 await user_auth_repository.initialize()
@@ -256,13 +358,17 @@ def create_app(
                 )
                 user_auth_service = None
                 user_auth_status = "unavailable"
-        pending_runs = PendingRunRepository(settings.resolved_agent_session_db)
+        pending_runs = relational_repositories.pending_runs(
+            settings.resolved_agent_session_db
+        )
         await pending_runs.initialize()
-        conversation_scopes = ConversationScopeRepository(
+        conversation_scopes = relational_repositories.conversation_scopes(
             settings.resolved_agent_session_db
         )
         await conversation_scopes.initialize()
-        catalog = CatalogRepository(settings.resolved_knowledge_catalog_db)
+        catalog = relational_repositories.catalog(
+            settings.resolved_knowledge_catalog_db
+        )
         await catalog.initialize()
         memory_repository = None
         memory_service = None
@@ -272,19 +378,23 @@ def create_app(
         memory_worker_status = "disabled"
         if settings.memory_enabled:
             try:
-                memory_repository = MemoryRepository(settings.resolved_memory_db)
+                memory_repository = relational_repositories.memory(
+                    settings.resolved_memory_db
+                )
                 await memory_repository.initialize()
                 await memory_repository.expire_memories()
-                entity_memory_repository = EntityMemoryRepository(
+                entity_memory_repository = relational_repositories.memory_entities(
                     settings.resolved_memory_db
                 )
                 await entity_memory_repository.initialize()
                 memory_index = None
                 if settings.resolved_embedding_api_key:
-                    memory_index = MemoryIndex(VectorStoreRepository.from_settings(
-                        settings,
-                        collection_name=settings.memory_chroma_collection_name,
-                    ))
+                    memory_index = MemoryIndex(
+                        create_vector_store_repository(
+                            settings,
+                            collection_name=settings.memory_chroma_collection_name,
+                        )
+                    )
                 extractor = None
                 if settings.memory_extraction_enabled and settings.resolved_deepseek_api_key:
                     extractor = MemoryExtractor(
@@ -336,7 +446,9 @@ def create_app(
         quality_status = "disabled"
         if settings.agent_quality_enabled:
             try:
-                quality_repository = QualityRepository(settings.resolved_agent_quality_db)
+                quality_repository = relational_repositories.quality(
+                    settings.resolved_agent_quality_db
+                )
                 await quality_repository.initialize()
                 await quality_repository.recover_stale_running(
                     settings.agent_quality_running_timeout_seconds
@@ -436,15 +548,10 @@ def create_app(
             )
             manager_reasoning_synthesizer = None
         registry = RetrievalPipelineRegistry(settings=settings)
-        await asyncio.to_thread(
-            registry.warm,
-            [
-                ("middle-platform", "指标平台"),
-                ("middle-platform", "审批流"),
-                ("middle-platform", "工作流"),
-                ("middle-platform", None),
-            ],
-        )
+        application.state.retrieval_pipeline_registry = registry
+        registry_close = getattr(registry, "close", None)
+        if callable(registry_close):
+            application.state._runtime_cleanup.callback(registry_close)
         mcp_client = MetricMCPClient(settings)
         application.state._runtime_cleanup.push_async_callback(mcp_client.close)
         await mcp_client.connect()
@@ -455,17 +562,10 @@ def create_app(
                 bug_graph_status = "unavailable"
             else:
                 try:
-                    settings.resolved_bug_graph_db.parent.mkdir(
-                        parents=True,
-                        exist_ok=True,
-                    )
-                    saver_context = AsyncSqliteSaver.from_conn_string(
-                        str(settings.resolved_bug_graph_db)
-                    )
+                    saver_context = _bug_graph_saver_context(settings)
                     saver = await application.state._runtime_cleanup.enter_async_context(
                         saver_context
                     )
-                    await saver.setup()
                     diagnosis_model = model
                     if (
                         settings.agent_model_provider == "deepseek"
@@ -546,6 +646,7 @@ def create_app(
             retrieval_max_identical_queries=(
                 settings.agent_retrieval_max_identical_queries
             ),
+            retrieval_timeout_seconds=settings.agent_retrieval_timeout_seconds,
             composite_evidence_enabled=settings.agent_composite_evidence_enabled,
             memory_service=memory_service,
             entity_memory_repository=entity_memory_repository,
@@ -569,14 +670,16 @@ def create_app(
             ),
             intent_router_min_confidence=settings.agent_intent_router_min_confidence,
             model_factory=model_factory,
-            session_factory=AgentSessionFactory(
-                settings.resolved_agent_session_db,
-                settings.agent_session_history_limit,
+            session_factory=_build_agent_session_factory(
+                settings,
+                database_resources,
             ),
             pending_runs=pending_runs,
             scope_repository=conversation_scopes,
             max_turns=settings.agent_max_turns,
             public_citation_limit=settings.agent_public_citation_limit,
+            citation_min_rerank_score=settings.agent_citation_min_rerank_score,
+            citation_min_rrf_score=settings.agent_citation_min_rrf_score,
             bug_graph_service=bug_graph_service,
             memory_service=memory_service,
             reasoning_synthesizer=manager_reasoning_synthesizer,
@@ -595,7 +698,7 @@ def create_app(
             application.state._runtime_cleanup.push_async_callback(judge_client.close)
             semantic_judge = DeepSeekSemanticJudge(
                 client=judge_client,
-                model=settings.deepseek_reasoning_model,
+                model=settings.agent_quality_judge_model,
             )
         quality_evaluator = (
             QualityEvaluationService(
@@ -610,12 +713,17 @@ def create_app(
                 ),
                 semantic_judge=semantic_judge,
                 case_timeout_seconds=settings.agent_quality_eval_case_timeout_seconds,
+                judge_timeout_seconds=settings.agent_quality_judge_timeout_seconds,
                 run_config_snapshot={
                     "prompt_version": settings.agent_prompt_version,
                     "knowledge_count": registry.repository.count(),
                     "direct_specialist": settings.agent_direct_specialist_enabled,
                     "composite_evidence": settings.agent_composite_evidence_enabled,
                 },
+                evidence_repository=registry.repository,
+                evidence_excerpt_max_chars=(
+                    settings.agent_quality_evidence_excerpt_max_chars
+                ),
             )
             if quality_repository is not None
             else None
@@ -649,7 +757,9 @@ def create_app(
             feishu_bridge = FeishuBotBridge(
                 gateway=gateway,
                 agent_service=service,
-                repository=FeishuEventRepository(settings.resolved_feishu_event_db),
+                repository=relational_repositories.feishu_events(
+                    settings.resolved_feishu_event_db
+                ),
                 quality_capture=quality_capture,
                 reply_max_chars=settings.feishu_reply_max_chars,
                 agent_timeout_seconds=settings.feishu_agent_timeout_seconds,
@@ -762,13 +872,26 @@ def create_app(
         application.state.memory_worker = memory_worker
         application.state.entity_memory_repository = entity_memory_repository
         application.state.user_auth_service = user_auth_service
+        application.state.database_resources = database_resources
         application.state.conversation_history_service = (
-            ConversationHistoryService(
+            relational_repositories.history(
                 user_auth_repository, settings.resolved_agent_session_db
             )
             if user_auth_repository is not None
             else None
         )
+        sqlite_ready = await pending_runs.check_ready()
+        vector_count = registry.repository.count()
+        relational_status = (
+            "available"
+            if (
+                postgres_ready
+                if settings.data_store_provider == "postgres"
+                else sqlite_ready
+            )
+            else "unavailable"
+        )
+        vector_status = "available"
         application.state.component_status = {
             "model": {
                 "status": "available",
@@ -788,14 +911,51 @@ def create_app(
                 ),
             },
             "sqlite": {
-                "status": "available"
-                if await pending_runs.check_ready()
-                else "unavailable"
+                "status": (
+                    "available"
+                    if settings.data_store_provider == "sqlite" and sqlite_ready
+                    else "disabled"
+                )
             },
             "chroma": {
-                "status": "available",
+                "status": (
+                    "available"
+                    if settings.vector_store_provider == "chroma"
+                    else "disabled"
+                ),
                 "collection": settings.chroma_collection_name,
-                "count": registry.repository.count(),
+                "count": vector_count,
+            },
+            "database": {
+                "status": relational_status,
+                "provider": settings.data_store_provider,
+            },
+            "vector_store": {
+                "status": vector_status,
+                "provider": settings.vector_store_provider,
+                "collection": settings.chroma_collection_name,
+                "count": vector_count,
+                "shadow_enabled": settings.vector_shadow_enabled,
+            },
+            "bm25": _bm25_component(
+                registry,
+                enabled=settings.retrieval_warmup_enabled,
+            ),
+            "postgres": {
+                "status": "available" if postgres_ready else (
+                    "unavailable" if database_resources.enabled else "disabled"
+                )
+            },
+            "pgvector": {
+                "status": (
+                    "available"
+                    if settings.vector_store_provider == "pgvector" and postgres_ready
+                    else (
+                        "shadow"
+                        if settings.vector_shadow_enabled and postgres_ready
+                        else "disabled"
+                    )
+                )
             },
             "mcp": {"status": mcp_client.status},
             "grafana_logs": {"status": grafana_status},
@@ -832,6 +992,11 @@ def create_app(
             },
             "swagger_cache": {"status": "available"},
         }
+        application.state.registry_warmup_task = _start_registry_warmup(
+            registry,
+            [("middle-platform", None)],
+            enabled=settings.retrieval_warmup_enabled,
+        )
         yield
 
     @asynccontextmanager
@@ -844,15 +1009,26 @@ def create_app(
                 yield
         finally:
             try:
-                await cleanup.aclose()
+                tasks = list(application.state.quality_completion_tasks)
+                if tasks:
+                    _, pending = await asyncio.wait(tasks, timeout=10)
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                    application.state.quality_completion_tasks.difference_update(tasks)
             finally:
-                application.state._runtime_cleanup = None
+                try:
+                    await cleanup.aclose()
+                finally:
+                    application.state._runtime_cleanup = None
 
     application = FastAPI(
         title="Middle Platform Agent API",
         version="0.1.0",
         lifespan=guarded_lifespan,
     )
+    application.state.quality_completion_tasks = set()
     application.include_router(create_auth_router())
     application.include_router(create_account_router())
     if injected_service is not None:
@@ -1135,6 +1311,27 @@ def create_app(
                 type(exc).__name__,
             )
 
+    def _schedule_quality_completion(run_id: str, coroutine: Any) -> None:
+        async def run_completion() -> None:
+            try:
+                await coroutine
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Quality completion task failed run_id=%s error_type=%s",
+                    run_id,
+                    type(exc).__name__,
+                )
+
+        task = asyncio.create_task(
+            run_completion(),
+            name="quality-turn-completion",
+        )
+        tasks = application.state.quality_completion_tasks
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
     @application.post("/api/v1/agent/chat", response_model=AgentResponse)
     async def chat(body: ChatRequest, request: Request, response: Response):
         run_id = str(uuid4())
@@ -1200,16 +1397,32 @@ def create_app(
 
     @application.post("/api/v1/agent/chat/stream")
     async def chat_stream(body: ChatRequest, request: Request):
-        identity_resolution = await _resolve_user_identity(request, "agent:query")
         scope_provided = bool(
             {"knowledge_space_id", "domain_id"} & body.model_fields_set
         )
-        conversation_id = await request.app.state.agent_service.prepare_conversation_scope(
-            body.conversation_id,
-            knowledge_space_id=body.knowledge_space_id,
-            domain_id=body.domain_id,
-            scope_provided=scope_provided,
+        identity_task = asyncio.create_task(
+            _resolve_user_identity(request, "agent:query"),
+            name="chat-identity-resolution",
         )
+        scope_task = asyncio.create_task(
+            request.app.state.agent_service.prepare_conversation_scope(
+                body.conversation_id,
+                knowledge_space_id=body.knowledge_space_id,
+                domain_id=body.domain_id,
+                scope_provided=scope_provided,
+            ),
+            name="chat-conversation-scope",
+        )
+        try:
+            identity_resolution, conversation_id = await asyncio.gather(
+                identity_task, scope_task
+            )
+        except BaseException:
+            for task in (identity_task, scope_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(identity_task, scope_task, return_exceptions=True)
+            raise
         if identity_resolution is not None:
             await request.app.state.user_auth_service.ownership.claim(
                 conversation_id,
@@ -1220,17 +1433,31 @@ def create_app(
 
         async def events():
             started_at = perf_counter()
-            quality_turn = await _start_quality_turn(
-                request,
-                body,
-                run_id=run_id,
-                conversation_id=conversation_id,
-                user_id=(
-                    identity_resolution.identity.owner_id
-                    if identity_resolution is not None
-                    else None
-                ),
+            yield _sse(
+                {
+                    "event": "run.started",
+                    "data": {
+                        "conversation_id": conversation_id,
+                        "run_id": run_id,
+                        "trace_id": None,
+                    },
+                }
             )
+            quality_turn_task = asyncio.create_task(
+                _start_quality_turn(
+                    request,
+                    body,
+                    run_id=run_id,
+                    conversation_id=conversation_id,
+                    user_id=(
+                        identity_resolution.identity.owner_id
+                        if identity_resolution is not None
+                        else None
+                    ),
+                ),
+                name="quality-turn-start",
+            )
+            quality_turn = None
             terminal = False
             public_deltas: list[str] = []
             try:
@@ -1245,59 +1472,97 @@ def create_app(
                     ),
                 ):
                     data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                    if event["event"] == "run.started":
+                        continue
                     if event["event"] == "text.delta":
                         public_deltas.append(str(data.get("delta") or ""))
-                    if event["event"] in {"run.started", "run.completed", "approval.required"}:
+                    if event["event"] in {"run.completed", "approval.required"}:
+                        quality_turn = await quality_turn_task
                         data["quality_turn_id"] = getattr(quality_turn, "id", None)
                         data["feedback_token"] = getattr(quality_turn, "feedback_token", None)
                         event["data"] = data
                     if event["event"] in {"run.completed", "approval.required"}:
                         terminal = True
-                        await _complete_quality_turn(
-                            request,
+                        quality_response = dict(data)
+                        _schedule_quality_completion(
                             run_id,
-                            status=str(data.get("status") or "completed"),
-                            duration_ms=(perf_counter() - started_at) * 1000,
-                            response=data,
+                            _complete_quality_turn(
+                                request,
+                                run_id,
+                                status=str(data.get("status") or "completed"),
+                                duration_ms=(perf_counter() - started_at) * 1000,
+                                response=quality_response,
+                            ),
                         )
                         data.pop("quality_spans", None)
                     elif event["event"] == "run.error":
                         terminal = True
-                        await _complete_quality_turn(
+                        _schedule_quality_completion(
+                            run_id,
+                            _complete_quality_turn(
+                                request,
+                                run_id,
+                                status="error",
+                                duration_ms=(perf_counter() - started_at) * 1000,
+                                answer="".join(public_deltas) or None,
+                                error_type=str(
+                                    data.get("error_type")
+                                    or data.get("error")
+                                    or "AgentRunError"
+                                ),
+                            ),
+                        )
+                    yield _sse(event)
+            except asyncio.CancelledError:
+                if not quality_turn_task.done():
+                    quality_turn_task.cancel()
+                    await asyncio.gather(quality_turn_task, return_exceptions=True)
+                if not terminal:
+                    _schedule_quality_completion(
+                        run_id,
+                        _complete_quality_turn(
+                            request,
+                            run_id,
+                            status="cancelled",
+                            duration_ms=(perf_counter() - started_at) * 1000,
+                            answer="".join(public_deltas) or None,
+                            error_type="CancelledError",
+                        ),
+                    )
+                raise
+            except Exception as exc:
+                if not quality_turn_task.done():
+                    quality_turn_task.cancel()
+                    await asyncio.gather(quality_turn_task, return_exceptions=True)
+                if not terminal:
+                    terminal = True
+                    _schedule_quality_completion(
+                        run_id,
+                        _complete_quality_turn(
                             request,
                             run_id,
                             status="error",
                             duration_ms=(perf_counter() - started_at) * 1000,
                             answer="".join(public_deltas) or None,
-                            error_type=str(
-                                data.get("error_type")
-                                or data.get("error")
-                                or "AgentRunError"
-                            ),
-                        )
-                    yield _sse(event)
-            except asyncio.CancelledError:
-                if not terminal:
-                    await _complete_quality_turn(
-                        request,
-                        run_id,
-                        status="cancelled",
-                        duration_ms=(perf_counter() - started_at) * 1000,
-                        answer="".join(public_deltas) or None,
-                        error_type="CancelledError",
+                            error_type=type(exc).__name__,
+                        ),
                     )
-                raise
-            except Exception as exc:
-                if not terminal:
-                    await _complete_quality_turn(
-                        request,
-                        run_id,
-                        status="error",
-                        duration_ms=(perf_counter() - started_at) * 1000,
-                        answer="".join(public_deltas) or None,
-                        error_type=type(exc).__name__,
+                    yield _sse(
+                        {
+                            "event": "run.error",
+                            "data": {
+                                "conversation_id": conversation_id,
+                                "run_id": run_id,
+                                "error": "服务暂时不可用，请稍后重试。",
+                                "error_type": type(exc).__name__,
+                            },
+                        }
                     )
-                raise
+            finally:
+                if not quality_turn_task.done():
+                    quality_turn_task.cancel()
+                    await asyncio.gather(quality_turn_task, return_exceptions=True)
+                return
 
         response = StreamingResponse(
             events(),
@@ -2059,8 +2324,7 @@ def create_app(
         if catalog is None:
             raise HTTPException(status_code=503, detail="knowledge catalog unavailable")
         result = []
-        for space in await catalog.list_spaces():
-            domains = await catalog.list_domains(space.id)
+        for space, domains in await catalog.list_spaces_with_domains():
             result.append(
                 {
                     "id": space.id,
@@ -2689,6 +2953,16 @@ def create_app(
             name: dict(details)
             for name, details in request.app.state.component_status.items()
         }
+        registry = getattr(
+            request.app.state,
+            "retrieval_pipeline_registry",
+            None,
+        )
+        if registry is not None and "bm25" in components:
+            components["bm25"] = _bm25_component(
+                registry,
+                enabled=components["bm25"].get("status") != "disabled",
+            )
         bridge = getattr(request.app.state, "feishu_bot_bridge", None)
         gateway = getattr(bridge, "gateway", None)
         connected = getattr(gateway, "connected", None)
@@ -2697,7 +2971,15 @@ def create_app(
             and connected is False
         ):
             components["feishu_bot"] = {"status": "unavailable"}
-        critical = ("model", "sqlite", "chroma")
+        relational_component = (
+            "database" if "database" in components else "sqlite"
+        )
+        vector_component = (
+            "vector_store" if "vector_store" in components else "chroma"
+        )
+        critical = ["model", relational_component, vector_component]
+        if components.get("bm25", {}).get("status") != "disabled" and "bm25" in components:
+            critical.append("bm25")
         critical_ready = all(
             components.get(name, {}).get("status") == "available" for name in critical
         )

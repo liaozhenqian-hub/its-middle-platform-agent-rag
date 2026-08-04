@@ -35,6 +35,17 @@ def test_guard_does_not_treat_metric_platform_as_a_vague_metric():
     assert decision is None
 
 
+def test_guard_answers_exact_greetings_without_invoking_an_agent():
+    guard = RequestGuard()
+
+    decision = guard.evaluate("你好")
+
+    assert decision is not None
+    assert decision.behavior == "greeting"
+    assert "中台" in decision.answer
+    assert guard.evaluate("你好，审批流怎么配置") is None
+
+
 def test_guard_allows_normal_business_questions():
     guard = RequestGuard()
 

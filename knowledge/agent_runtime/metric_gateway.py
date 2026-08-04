@@ -7,13 +7,15 @@ from typing import Any
 from agents import FunctionTool, RunContextWrapper, function_tool
 
 from knowledge.agent_runtime.context import AgentRunContext
+from knowledge.agent_runtime.metric_mcp import MetricMCPResultCache
 
 
 class MetricQueryGuard:
     _CONFIRMATION_MARKERS = ("确认", "选择", "选用", "使用", "第一个", "第二个", "选a", "选b")
 
-    def __init__(self, server: Any):
+    def __init__(self, server: Any, cache: MetricMCPResultCache | None = None):
         self.server = server
+        self.cache = cache or MetricMCPResultCache()
 
     def prepare(self, context: AgentRunContext, *, selected_app: str) -> dict[str, Any]:
         message = self._normalize(context.current_user_message)
@@ -23,6 +25,7 @@ class MetricQueryGuard:
         )
         if not explicitly_confirmed:
             context.response_mode = "clarification"
+            context.metric_query_stage = "awaiting_app_confirmation"
             return {
                 "status": "clarification_required",
                 "message": "请先向用户展示指标应用候选，并让用户明确选择应用后再查询。",
@@ -30,6 +33,7 @@ class MetricQueryGuard:
         token = secrets.token_urlsafe(12)
         context.metric_confirmation_token = token
         context.metric_confirmed_app = selected_app.strip()
+        context.metric_query_stage = "confirmed"
         return {
             "status": "confirmed",
             "selected_app": context.metric_confirmed_app,
@@ -50,14 +54,24 @@ class MetricQueryGuard:
                 "status": "clarification_required",
                 "message": "指标应用尚未由用户明确确认，已阻止数据查询。",
             }
-        result = await self.server.call_tool(
-            "searchMetricAppQueryResult",
-            {"req": req, "limit": limit},
-        )
+        scope = self._scope(context)
+        arguments = {"req": req, "limit": limit}
+        cached = self.cache.get(*scope, "searchMetricAppQueryResult", arguments)
+        if cached is not None:
+            context.metric_query_stage = "completed"
+            return {
+                "status": "completed", "tool": "searchMetricAppQueryResult",
+                "result": cached, "cache_hit": True,
+            }
+        raw = await self.server.call_tool("searchMetricAppQueryResult", arguments)
+        result = self._public_result(raw)
+        self.cache.put(*scope, "searchMetricAppQueryResult", arguments, result)
+        context.metric_query_stage = "completed"
         return {
             "status": "completed",
             "tool": "searchMetricAppQueryResult",
-            "result": self._public_result(result),
+            "result": result,
+            "cache_hit": False,
         }
 
     async def query_sql(
@@ -80,14 +94,21 @@ class MetricQueryGuard:
             if fuzzy
             else "searchSqlByMetricTypeAndNameExact"
         )
-        result = await self.server.call_tool(
-            tool_name,
-            {"metricType": metric_type, "name": name},
-        )
+        scope = self._scope(context)
+        arguments = {"metricType": metric_type, "name": name}
+        cached = self.cache.get(*scope, tool_name, arguments)
+        if cached is not None:
+            context.metric_query_stage = "completed"
+            return {"status": "completed", "tool": tool_name, "result": cached, "cache_hit": True}
+        raw = await self.server.call_tool(tool_name, arguments)
+        result = self._public_result(raw)
+        self.cache.put(*scope, tool_name, arguments, result)
+        context.metric_query_stage = "completed"
         return {
             "status": "completed",
             "tool": tool_name,
-            "result": self._public_result(result),
+            "result": result,
+            "cache_hit": False,
         }
 
     @staticmethod
@@ -96,6 +117,10 @@ class MetricQueryGuard:
             token,
             context.metric_confirmation_token or "",
         )
+
+    @staticmethod
+    def _scope(context: AgentRunContext) -> tuple[str, str]:
+        return (context.user_id or "anonymous", context.conversation_id)
 
     @staticmethod
     def _normalize(value: str) -> str:

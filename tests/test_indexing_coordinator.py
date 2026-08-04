@@ -42,9 +42,14 @@ class FakeVectorRepository:
 class FakeRegistry:
     def __init__(self):
         self.invalidations = []
+        self.refreshes = []
 
     def invalidate(self, **kwargs):
         self.invalidations.append(kwargs)
+        return 1
+
+    def refresh(self, **kwargs):
+        self.refreshes.append(kwargs)
         return 1
 
 
@@ -137,7 +142,8 @@ async def test_git_full_index_upserts_before_deleting_and_promotes_commit(tmp_pa
     ]
     source = await catalog.get_source("git-1")
     assert source.config["last_synced_commit"] == "abc123"
-    assert registry.invalidations == [{"app_id": "middle-platform"}]
+    assert registry.refreshes == [{"app_id": "middle-platform"}]
+    assert registry.invalidations == []
 
 
 def test_git_index_diff_only_embeds_new_or_changed_content():
@@ -323,7 +329,7 @@ async def test_post_upsert_promotion_failure_restores_old_vector_and_catalog(tmp
 
 
 @pytest.mark.asyncio
-async def test_current_version_retry_repairs_checkpoint_and_invalidates_bm25(tmp_path: Path):
+async def test_current_version_retry_repairs_checkpoint_and_refreshes_bm25(tmp_path: Path):
     catalog = CatalogRepository(tmp_path / "catalog.db")
     await catalog.initialize()
     await catalog.create_source(
@@ -344,13 +350,14 @@ async def test_current_version_retry_repairs_checkpoint_and_invalidates_bm25(tmp
     coordinator = SourceIndexCoordinator(catalog, vector, registry)
     await coordinator.index_document_version("doc-1", "v2", upload)
     await catalog.update_source("doc-1", config={})
-    registry.invalidations.clear()
+    registry.refreshes.clear()
 
     summary = await coordinator.index_document_version("doc-1", "v2", upload)
 
     assert summary.upserted == 0
     assert (await catalog.get_source("doc-1")).config["last_synced_version"] == "v2"
-    assert registry.invalidations == [{"app_id": "middle-platform"}]
+    assert registry.refreshes == [{"app_id": "middle-platform"}]
+    assert registry.invalidations == []
 
 
 @pytest.mark.asyncio

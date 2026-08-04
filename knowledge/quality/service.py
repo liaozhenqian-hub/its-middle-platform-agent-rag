@@ -179,14 +179,17 @@ class QualityCaptureService:
                 status=item.status or "unknown",
                 duration_ms=item.duration_ms,
             ))
-        for span in spans:
-            try:
-                await self.repository.record_span(span)
-            except Exception as exc:
-                logger.warning(
-                    "Quality span failed turn_id=%s kind=%s error_type=%s",
-                    turn.id, span.kind, type(exc).__name__,
-                )
+        if not spans:
+            return
+        try:
+            await self.repository.record_spans(spans)
+        except Exception as exc:
+            logger.warning(
+                "Quality span batch failed turn_id=%s count=%s error_type=%s",
+                turn.id,
+                len(spans),
+                type(exc).__name__,
+            )
 
     async def _annotate_completion(self, turn: Any, value: TurnCompletion) -> None:
         annotations: list[QualityAnnotationCreate] = []

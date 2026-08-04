@@ -68,6 +68,36 @@ async def test_anonymous_identity_reuses_owner_and_slides_expiry(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_anonymous_identity_uses_atomic_refresh_for_existing_cookie(tmp_path):
+    repository = UserAuthRepository(tmp_path / "auth.db")
+    await repository.initialize()
+    now = datetime(2026, 7, 23, 8, 0, tzinfo=UTC)
+    created = await repository.create_anonymous_device(
+        token_hash=hashlib.sha256(b"existing-cookie").hexdigest(),
+        expires_at=now + timedelta(days=1),
+        now=now,
+    )
+    refresh_calls = []
+
+    async def refresh(token_hash, *, expires_at, now=None):
+        refresh_calls.append((token_hash, expires_at, now))
+        return created
+
+    async def legacy_lookup(*args, **kwargs):
+        raise AssertionError("legacy lookup/touch path should not be used")
+
+    repository.refresh_active_anonymous_device = refresh
+    repository.get_active_anonymous_device = legacy_lookup
+    repository.touch_anonymous_device = legacy_lookup
+    service = AnonymousIdentityService(repository, ttl_seconds=30 * 24 * 3600)
+
+    resolution = await service.resolve("existing-cookie", now=now)
+
+    assert resolution.identity.owner_id == created.owner_id
+    assert len(refresh_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_disabled_or_unknown_anonymous_cookie_gets_fresh_identity(tmp_path):
     repository = UserAuthRepository(tmp_path / "auth.db")
     await repository.initialize()

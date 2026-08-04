@@ -95,6 +95,35 @@ async def test_anonymous_device_lifecycle_uses_hash_and_disables_after_merge(tmp
 
 
 @pytest.mark.asyncio
+async def test_active_anonymous_device_can_be_refreshed_atomically(tmp_path):
+    repository = UserAuthRepository(tmp_path / "auth.db")
+    await repository.initialize()
+    now = datetime(2026, 7, 23, 1, 0, tzinfo=UTC)
+    created = await repository.create_anonymous_device(
+        token_hash="hash-refresh",
+        expires_at=now + timedelta(days=1),
+        now=now,
+    )
+
+    assert hasattr(repository, "refresh_active_anonymous_device")
+    refreshed = await repository.refresh_active_anonymous_device(
+        "hash-refresh",
+        expires_at=now + timedelta(days=2),
+        now=now + timedelta(hours=1),
+    )
+
+    assert refreshed is not None
+    assert refreshed.owner_id == created.owner_id
+    assert refreshed.last_seen_at == now + timedelta(hours=1)
+    assert refreshed.expires_at == now + timedelta(days=2)
+    assert await repository.refresh_active_anonymous_device(
+        "unknown-hash",
+        expires_at=now + timedelta(days=2),
+        now=now + timedelta(hours=1),
+    ) is None
+
+
+@pytest.mark.asyncio
 async def test_oauth_state_is_single_use_and_feishu_user_is_upserted(tmp_path):
     repository = UserAuthRepository(tmp_path / "auth.db")
     await repository.initialize()
@@ -188,6 +217,45 @@ async def test_conversation_owner_binding_rejects_cross_owner_reuse(tmp_path):
 
     assert first.owner_id == same.owner_id == "anon:first"
     assert same.last_seen_at == now + timedelta(minutes=1)
+
+
+@pytest.mark.asyncio
+async def test_conversation_owner_binding_uses_one_atomic_statement(tmp_path, monkeypatch):
+    repository = UserAuthRepository(tmp_path / "auth.db")
+    await repository.initialize()
+    original_connect = repository._connect
+    statements = []
+
+    class CountingConnection:
+        def __init__(self):
+            self.inner_context = original_connect()
+            self.database = None
+
+        async def __aenter__(self):
+            self.database = await self.inner_context.__aenter__()
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return await self.inner_context.__aexit__(exc_type, exc, traceback)
+
+        async def execute(self, statement, parameters=()):
+            statements.append(statement)
+            return await self.database.execute(statement, parameters)
+
+        async def commit(self):
+            return await self.database.commit()
+
+        async def rollback(self):
+            return await self.database.rollback()
+
+    monkeypatch.setattr(repository, "_connect", CountingConnection)
+
+    owner = await repository.bind_conversation_owner(
+        "conversation-atomic", "anon:first", channel="web"
+    )
+
+    assert owner.conversation_id == "conversation-atomic"
+    assert len(statements) == 1
 
 
 @pytest.mark.asyncio

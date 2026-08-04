@@ -10,6 +10,7 @@ from knowledge.quality import (
     ToolRunSnapshot,
 )
 from knowledge.quality.behavior import BehaviorChecker
+from knowledge.schemas.documents import KnowledgeChunk
 
 
 def test_behavior_checker_recognizes_equivalent_chinese_clarification_and_refusal():
@@ -219,6 +220,101 @@ async def test_evaluation_invokes_semantic_judge_only_after_hard_gates(tmp_path)
     assert judged.review_state == "review_required"
     assert failed.judge_score is None
     assert "required_facts" in failed.failure_codes
+
+
+@pytest.mark.asyncio
+async def test_semantic_judge_receives_bounded_redacted_evidence_excerpts(tmp_path):
+    repository = QualityRepository(tmp_path / "quality-evidence.db")
+    await repository.initialize()
+    case = await repository.create_eval_case(
+        EvalCaseCreate(
+            name="Evidence support",
+            question="Where is the timeout handled?",
+            required_citation_types=["code"],
+            required_facts=["timeout handling"],
+            suite="critical-v2",
+        )
+    )
+
+    class EvidenceRepository:
+        def get_chunks(self, *, ids):
+            assert ids == ["code-1"]
+            return [
+                KnowledgeChunk(
+                    chunk_id="code-1",
+                    heading="Timeout handler",
+                    content=(
+                        "Authorization: Bearer private-token "
+                        + ("irrelevant prefix " * 100)
+                        + " TimeoutHandler.handle timeout handling"
+                    ),
+                    metadata={"source_type": "code"},
+                )
+            ]
+
+    class Judge:
+        def __init__(self):
+            self.payload = None
+
+        async def judge(self, **payload):
+            self.payload = payload
+            return {
+                "score": 90,
+                "facts_supported": True,
+                "critical_contradiction": False,
+            }
+
+    judge = Judge()
+
+    class EvidenceAgent:
+        async def chat(self, message, conversation_id=None, **kwargs):
+            return FakeResponse(
+                conversation_id=conversation_id,
+                citations=[
+                    CitationSnapshot(
+                        source_type="code",
+                        source_id="code-1",
+                        title="TimeoutHandler.handle",
+                    )
+                ],
+            )
+
+    evaluator = QualityEvaluationService(
+        repository=repository,
+        agent_service=EvidenceAgent(),
+        application_version="0.2.0",
+        provider="deepseek",
+        model_name="deepseek-v4-flash",
+        semantic_judge=judge,
+        evidence_repository=EvidenceRepository(),
+        evidence_excerpt_max_chars=200,
+    )
+
+    result = await evaluator.run_cases([case.id])
+
+    assert result.passed_cases == 1
+    excerpt = judge.payload["evidence"][0]["excerpt"]
+    assert "timeout handling" in excerpt
+    assert len(excerpt) <= 200
+    assert "private-token" not in excerpt
+
+
+def test_default_evidence_excerpt_keeps_a_complete_short_method_chunk(tmp_path):
+    evaluator = QualityEvaluationService(
+        repository=QualityRepository(tmp_path / "quality.db"),
+        agent_service=FakeAgentService(),
+        application_version="0.2.0",
+        provider="deepseek",
+        model_name="deepseek-v4-flash",
+    )
+    method = "completionCondition" + (" x" * 2000) + " FINAL_BRANCH"
+
+    excerpt = evaluator._sanitize_excerpt(
+        method,
+        anchors=["completionCondition"],
+    )
+
+    assert "FINAL_BRANCH" in excerpt
 
 
 @pytest.mark.asyncio

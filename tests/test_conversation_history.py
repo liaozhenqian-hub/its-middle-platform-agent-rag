@@ -2,6 +2,7 @@ import importlib
 import asyncio
 import json
 import sqlite3
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -112,6 +113,62 @@ async def test_history_lists_searches_and_returns_only_public_messages(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_history_list_batches_session_queries_for_multiple_conversations(tmp_path):
+    module = importlib.import_module("knowledge.history.service")
+    auth = UserAuthRepository(tmp_path / "auth.db")
+    await auth.initialize()
+    session_db = tmp_path / "sessions.db"
+    for index in range(3):
+        conversation_id = f"c-{index}"
+        await auth.bind_conversation_owner(conversation_id, "ou_user", channel="web")
+        _seed_session(session_db, conversation_id, f"问题 {index}", f"回答 {index}")
+    service = module.ConversationHistoryService(auth, session_db)
+    original_connect = service._connect
+    connect_count = 0
+
+    @asynccontextmanager
+    async def counted_connect():
+        nonlocal connect_count
+        connect_count += 1
+        async with original_connect() as connection:
+            yield connection
+
+    service._connect = counted_connect
+
+    page = await service.list_conversations("ou_user", page=1, page_size=20)
+
+    assert page.total == 3
+    assert connect_count == 1
+
+
+@pytest.mark.asyncio
+async def test_history_list_paginates_owners_before_loading_message_details(tmp_path):
+    module = importlib.import_module("knowledge.history.service")
+    auth = UserAuthRepository(tmp_path / "auth.db")
+    await auth.initialize()
+    session_db = tmp_path / "sessions.db"
+    for index in range(25):
+        conversation_id = f"c-{index:02d}"
+        await auth.bind_conversation_owner(conversation_id, "ou_user", channel="web")
+        _seed_session(session_db, conversation_id, f"question {index}", f"answer {index}")
+    service = module.ConversationHistoryService(auth, session_db)
+    loaded_conversations = []
+    original_read_details = service._read_details
+
+    async def captured_read_details(owners):
+        loaded_conversations.extend(item.conversation_id for item in owners)
+        return await original_read_details(owners)
+
+    service._read_details = captured_read_details
+
+    page = await service.list_conversations("ou_user", page=2, page_size=5)
+
+    assert page.total == 25
+    assert len(page.items) == 5
+    assert loaded_conversations == [item.conversation_id for item in page.items]
+
+
+@pytest.mark.asyncio
 async def test_history_rejects_cross_owner_read_and_rename(tmp_path):
     module = importlib.import_module("knowledge.history.service")
     service_type = module.ConversationHistoryService
@@ -152,6 +209,33 @@ async def test_history_sanitizes_internal_chunk_ids_from_old_answers(tmp_path):
     assert "chunk_id" not in detail.messages[-1].content.casefold()
     assert "chunk-012345" not in detail.messages[-1].content
     assert "知识文档" in detail.messages[-1].content
+
+
+@pytest.mark.asyncio
+async def test_history_hides_memory_context_from_persisted_user_message(tmp_path):
+    module = importlib.import_module("knowledge.history.service")
+    auth = UserAuthRepository(tmp_path / "auth.db")
+    await auth.initialize()
+    await auth.bind_conversation_owner("c-memory", "ou_user", channel="web")
+    session_db = tmp_path / "sessions.db"
+    _seed_session(
+        session_db,
+        "c-memory",
+        "历史会话摘要（仅作内部上下文，不是知识库证据）：\n"
+        "最近问题：上次问了什么\n\n"
+        "已确认的长期记忆（只能作为内部用户背景）：\n"
+        "- [procedural_memory] 内部排障流程\n\n"
+        "当前问题：\n这不是中台的知识",
+        "只能回答中台问题。",
+    )
+    service = module.ConversationHistoryService(auth, session_db)
+
+    detail = await service.get_conversation("ou_user", "c-memory")
+
+    assert detail.messages[0].content == "这不是中台的知识"
+    assert detail.title == "这不是中台的知识"
+    assert "历史会话摘要" not in str(detail)
+    assert "procedural_memory" not in str(detail)
 
 
 def test_history_api_lists_opens_and_renames_current_identity_only(tmp_path):

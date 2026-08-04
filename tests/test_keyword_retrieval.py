@@ -9,6 +9,7 @@ class InMemoryChunkRepository:
     def __init__(self, chunks: list[KnowledgeChunk]):
         self.chunks = chunks
         self.index_filters: list[dict | None] = []
+        self.chunk_id_requests: list[dict | None] = []
         self.body_requests: list[list[str] | None] = []
 
     @staticmethod
@@ -35,6 +36,7 @@ class InMemoryChunkRepository:
         ]
 
     def get_chunk_ids(self, where=None):
+        self.chunk_id_requests.append(where)
         return {
             chunk.chunk_id
             for chunk in self.chunks
@@ -185,6 +187,51 @@ def test_keyword_search_applies_additional_metadata_filter():
     results = service.search("SDK 查询", k=5, where={"chunk_type": "faq"})
 
     assert [result.chunk_id for result in results] == ["faq"]
+
+
+def test_filtered_keyword_search_does_not_fetch_eligible_ids_from_repository():
+    repository = InMemoryChunkRepository(
+        [
+            _chunk("faq", "审批流管理员转办", "管理员, 转办", chunk_type="faq"),
+            _chunk(
+                "code",
+                "审批流管理员转办实现",
+                "adminTransfer",
+                chunk_type="code",
+            ),
+        ]
+    )
+    service = KeywordRetrievalService(repository, app_id="middle-platform")
+
+    results = service.search(
+        "管理员转办",
+        where={"chunk_type": "faq"},
+    )
+
+    assert repository.chunk_id_requests == []
+    assert [item.chunk_id for item in results] == ["faq"]
+    assert repository.body_requests == [["faq"]]
+
+
+def test_keyword_search_can_fall_back_to_repository_filtering():
+    repository = InMemoryChunkRepository(
+        [_chunk("faq", "SDK 查询", "SDK", chunk_type="faq")]
+    )
+    service = KeywordRetrievalService(
+        repository,
+        app_id="middle-platform",
+        memory_filter_enabled=False,
+    )
+
+    assert service.search("SDK", where={"chunk_type": "faq"})
+    assert repository.chunk_id_requests == [
+        {
+            "$and": [
+                {"app_id": "middle-platform"},
+                {"chunk_type": "faq"},
+            ]
+        }
+    ]
 
 
 def test_keyword_scores_are_normalized_inside_the_filtered_candidate_set():

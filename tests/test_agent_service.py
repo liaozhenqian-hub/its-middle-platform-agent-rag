@@ -5,6 +5,7 @@ import pytest
 from agents.exceptions import ModelBehaviorError
 from agents import RunConfig
 
+from knowledge.agent_runtime.context import AgentRunContext
 from knowledge.agent_runtime.conversation_scopes import (
     ConversationScopeConflictError,
     ConversationScopeRepository,
@@ -341,6 +342,7 @@ class DuplicateCitationRunner(FakeRunner):
                     "branch": "develop",
                     "relative_path": "WorkflowService.java",
                     "symbol_name": "WorkflowService.run",
+                    "_retrieval": {"exact": True},
                 },
             )
         return FakeResult("根据代码证据回答")
@@ -371,6 +373,24 @@ class FakeModelFactory:
             trace_id="trace_0123456789abcdef0123456789abcdef",
             trace_include_sensitive_data=False,
             tracing_disabled=True,
+        )
+
+
+class RecordingScopeRepository:
+    def __init__(self):
+        self.get_calls = []
+        self.bind_calls = []
+
+    async def get(self, conversation_id):
+        self.get_calls.append(conversation_id)
+        return None
+
+    async def bind(self, conversation_id, knowledge_space_id, domain_id):
+        self.bind_calls.append((conversation_id, knowledge_space_id, domain_id))
+        return SimpleNamespace(
+            conversation_id=conversation_id,
+            knowledge_space_id=knowledge_space_id,
+            domain_id=domain_id,
         )
 
 
@@ -450,6 +470,33 @@ async def test_agent_service_runs_with_session_context_and_server_limits(tmp_pat
     assert kwargs["max_turns"] == 12
     assert kwargs["context"].conversation_id == "conversation-1"
     assert kwargs["session"].session_settings.limit == 50
+
+
+@pytest.mark.asyncio
+async def test_prepare_new_conversation_binds_scope_without_redundant_lookup(tmp_path):
+    pending = PendingRunRepository(tmp_path / "agent.db")
+    await pending.initialize()
+    scopes = RecordingScopeRepository()
+    service = AgentService(
+        manager=object(),
+        model_factory=FakeModelFactory(),
+        session_factory=AgentSessionFactory(tmp_path / "agent.db", 50),
+        pending_runs=pending,
+        scope_repository=scopes,
+        runner=FakeRunner(),
+    )
+
+    conversation_id = await service.prepare_conversation_scope(
+        None,
+        knowledge_space_id="middle-platform",
+        domain_id="approval-flow",
+        scope_provided=True,
+    )
+
+    assert scopes.get_calls == []
+    assert scopes.bind_calls == [
+        (conversation_id, "middle-platform", "approval-flow")
+    ]
 
 
 @pytest.mark.asyncio
@@ -559,6 +606,35 @@ async def test_agent_service_returns_deduplicated_citations(tmp_path):
     response = await service.chat("工作流怎么运行", "conversation-citations")
 
     assert [citation.source_id for citation in response.citations] == ["code-1"]
+
+
+def test_agent_service_applies_configured_public_citation_thresholds(tmp_path):
+    service = AgentService(
+        manager=object(),
+        model_factory=FakeModelFactory(),
+        session_factory=AgentSessionFactory(tmp_path / "agent.db", 50),
+        pending_runs=object(),
+        public_citation_limit=5,
+        citation_min_rerank_score=0.8,
+        citation_min_rrf_score=0.03,
+    )
+    context = AgentRunContext("conversation", "run")
+    context.add_knowledge_citation(
+        "weak",
+        "Weak result",
+        "Workflow",
+        {
+            "source_type": "code",
+            "relative_path": "Weak.java",
+            "_retrieval": {
+                "rerank_applied": True,
+                "rerank_score": 0.7,
+                "fusion_score": 0.04,
+            },
+        },
+    )
+
+    assert service._public_citations(context) == []
 
 
 @pytest.mark.asyncio
@@ -1216,7 +1292,7 @@ async def test_agent_service_maps_sdk_stream_events_without_tool_output(tmp_path
 
     events = [
         event
-        async for event in service.stream_chat("你好", "conversation-stream")
+        async for event in service.stream_chat("审批流接口怎么查询", "conversation-stream")
     ]
 
     assert [event["event"] for event in events] == [

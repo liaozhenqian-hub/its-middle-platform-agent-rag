@@ -15,6 +15,9 @@ from uuid import uuid4
 
 import aiosqlite
 
+from knowledge.persistence.database import DatabaseResources
+from knowledge.persistence.sqlite_compat import PostgresCompatConnection
+
 from knowledge.quality.models import (
     CitationSnapshot,
     EvalCase,
@@ -856,35 +859,50 @@ class QualityRepository:
             ).fetchone()
         return self._feedback_from_row(row)
 
-    async def record_span(self, value: QualitySpanCreate) -> QualitySpan:
-        if value.kind not in {"agent", "llm", "tool", "graph"}:
-            raise ValueError("unsupported quality span kind")
-        span_id = str(uuid4())
-        now = self._now()
-        metadata = self._sanitize_audit(value.metadata)
+    async def record_spans(
+        self, values: list[QualitySpanCreate]
+    ) -> list[QualitySpan]:
+        if not values:
+            return []
+        for value in values:
+            if value.kind not in {"agent", "llm", "tool", "graph"}:
+                raise ValueError("unsupported quality span kind")
+        rows = [
+            (str(uuid4()), value, self._now(), self._sanitize_audit(value.metadata))
+            for value in values
+        ]
 
         async def operation(database: aiosqlite.Connection) -> None:
-            await database.execute(
-                """
-                INSERT INTO quality_spans(
-                    id, turn_id, run_id, kind, name, status, duration_ms,
-                    input_tokens, output_tokens, total_tokens, metadata_json, created_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    span_id, value.turn_id, value.run_id, value.kind, value.name,
-                    value.status, value.duration_ms, max(0, value.input_tokens),
-                    max(0, value.output_tokens), max(0, value.total_tokens),
-                    self._json(metadata), now,
-                ),
-            )
+            for span_id, value, now, metadata in rows:
+                await database.execute(
+                    """
+                    INSERT INTO quality_spans(
+                        id, turn_id, run_id, kind, name, status, duration_ms,
+                        input_tokens, output_tokens, total_tokens, metadata_json, created_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        span_id, value.turn_id, value.run_id, value.kind, value.name,
+                        value.status, value.duration_ms, max(0, value.input_tokens),
+                        max(0, value.output_tokens), max(0, value.total_tokens),
+                        self._json(metadata), now,
+                    ),
+                )
 
         await self._write(operation)
+        placeholders = ",".join("?" for _ in rows)
         async with self._connect() as database:
-            row = await (
-                await database.execute("SELECT * FROM quality_spans WHERE id=?", (span_id,))
-            ).fetchone()
-        return self._span_from_row(row)
+            stored = await (
+                await database.execute(
+                    f"SELECT * FROM quality_spans WHERE id IN ({placeholders})",
+                    [item[0] for item in rows],
+                )
+            ).fetchall()
+        by_id = {row["id"]: self._span_from_row(row) for row in stored}
+        return [by_id[item[0]] for item in rows]
+
+    async def record_span(self, value: QualitySpanCreate) -> QualitySpan:
+        return (await self.record_spans([value]))[0]
 
     async def create_annotation(
         self, value: QualityAnnotationCreate
@@ -1785,3 +1803,41 @@ class QualityRepository:
     @staticmethod
     def _now() -> str:
         return datetime.now(UTC).isoformat()
+
+
+class PostgresQualityRepository(QualityRepository):
+    def __init__(self, database_resources: DatabaseResources):
+        self.database_resources = database_resources
+
+    async def initialize(self) -> None:
+        if not await self.database_resources.check_ready():
+            raise RuntimeError("PostgreSQL quality repository is unavailable")
+
+    @asynccontextmanager
+    async def _connect(self):
+        async with PostgresCompatConnection(self.database_resources) as connection:
+            yield connection
+
+    async def claim_next_eval_run(self) -> EvalRun | None:
+        now = self._now()
+        async with self._connect() as database:
+            cursor = await database.execute(
+                """
+                WITH candidate AS (
+                    SELECT id FROM eval_runs
+                    WHERE status='queued'
+                    ORDER BY created_at, id
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 1
+                )
+                UPDATE eval_runs AS run
+                SET status='running', updated_at=?
+                FROM candidate
+                WHERE run.id=candidate.id
+                RETURNING run.*
+                """,
+                (now,),
+            )
+            row = await cursor.fetchone()
+            await database.commit()
+        return self._eval_run_from_row(row) if row is not None else None

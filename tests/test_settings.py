@@ -109,6 +109,23 @@ def test_settings_exposes_query_rewrite_and_rerank_defaults():
     assert settings.keyword_candidate_k == 20
     assert settings.vector_candidate_k == 20
     assert settings.final_result_k == 5
+    assert settings.retrieval_warmup_enabled is True
+    assert settings.bm25_memory_filter_enabled is True
+    assert settings.bm25_stale_while_refresh_enabled is True
+    assert settings.retrieval_parallel_routes_enabled is True
+
+
+def test_retrieval_performance_switches_can_be_disabled():
+    settings = Settings(
+        _env_file=None,
+        BM25_MEMORY_FILTER_ENABLED=False,
+        BM25_STALE_WHILE_REFRESH_ENABLED=False,
+        RETRIEVAL_PARALLEL_ROUTES_ENABLED=False,
+    )
+
+    assert settings.bm25_memory_filter_enabled is False
+    assert settings.bm25_stale_while_refresh_enabled is False
+    assert settings.retrieval_parallel_routes_enabled is False
 
 
 def test_settings_exposes_logging_defaults():
@@ -174,6 +191,7 @@ def test_settings_exposes_bug_graph_and_citation_detail_defaults():
     settings = Settings(_env_file=None)
 
     assert settings.bug_graph_enabled is True
+    assert settings.bug_graph_checkpoint_provider == "auto"
     assert settings.resolved_bug_graph_db == PROJECT_ROOT / "storage/bug_graph.db"
     assert settings.bug_graph_interrupt_ttl_seconds == 86400
     assert settings.bug_graph_log_retry_count == 2
@@ -189,9 +207,13 @@ def test_settings_exposes_agent_reliability_defaults():
     assert settings.agent_intent_router_enabled is True
     assert settings.agent_llm_router_enabled is True
     assert settings.agent_intent_router_min_confidence == 0.75
-    assert settings.agent_retrieval_max_calls == 3
+    assert settings.agent_retrieval_max_calls == 4
     assert settings.agent_retrieval_max_identical_queries == 1
-    assert settings.agent_public_citation_limit == 10
+    assert settings.agent_public_citation_limit == 5
+    assert settings.agent_citation_min_rerank_score == 0.35
+    assert settings.agent_citation_min_rrf_score == 0.02
+    assert settings.agent_quality_evidence_excerpt_max_chars == 5000
+    assert settings.agent_quality_judge_timeout_seconds == 45
     assert settings.metric_query_guard_enabled is True
     assert settings.grafana_log_max_range_minutes == 1440
 

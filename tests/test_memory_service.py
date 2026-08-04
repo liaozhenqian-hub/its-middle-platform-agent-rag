@@ -9,6 +9,34 @@ from knowledge.memory.service import MemoryService
 
 
 @pytest.mark.asyncio
+async def test_memory_recall_skips_vector_search_when_no_visible_records():
+    class EmptyRepository:
+        async def list_memories(self, **kwargs):
+            return []
+
+    class CountingIndex:
+        def __init__(self):
+            self.calls = 0
+
+        def search(self, *args, **kwargs):
+            self.calls += 1
+            return []
+
+    index = CountingIndex()
+    service = MemoryService(EmptyRepository(), index=index)
+
+    result = await service.recall(
+        "审批接口",
+        user_id="user-without-memory",
+        space_id="middle-platform",
+        domain_id="approval-flow",
+    )
+
+    assert result == []
+    assert index.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_memory_service_recall_only_returns_confirmed_visible_records(tmp_path):
     repository = MemoryRepository(tmp_path / "memory.db")
     await repository.initialize()

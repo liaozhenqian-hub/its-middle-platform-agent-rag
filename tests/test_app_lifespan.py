@@ -1,4 +1,6 @@
 import base64
+import asyncio
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -6,6 +8,79 @@ from fastapi.testclient import TestClient
 
 import knowledge.api.app as app_module
 from knowledge.config.settings import Settings
+
+
+@pytest.mark.asyncio
+async def test_registry_warmup_runs_without_blocking_application_startup():
+    started = Event()
+    release = Event()
+
+    class SlowRegistry:
+        def warm(self, _scopes):
+            started.set()
+            release.wait(timeout=2)
+
+    task = app_module._start_registry_warmup(
+        SlowRegistry(),
+        [("middle-platform", None)],
+    )
+
+    assert await asyncio.to_thread(started.wait, 0.5)
+    assert not task.done()
+    release.set()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_registry_warmup_can_be_disabled_for_remote_vector_storage():
+    class Registry:
+        def warm(self, _scopes):
+            raise AssertionError("disabled warmup must not run")
+
+    task = app_module._start_registry_warmup(
+        Registry(),
+        [("middle-platform", None)],
+        enabled=False,
+    )
+
+    assert task is None
+
+
+def test_bm25_component_uses_live_registry_status():
+    class Registry:
+        def warm_status(self):
+            return {"status": "available", "cached_pipelines": 1}
+
+    assert app_module._bm25_component(Registry(), enabled=True) == {
+        "status": "available",
+        "cached_pipelines": 1,
+    }
+
+
+def test_bm25_component_is_disabled_when_warmup_is_off():
+    assert app_module._bm25_component(object(), enabled=False) == {
+        "status": "disabled",
+        "cached_pipelines": 0,
+    }
+
+
+def test_readiness_is_degraded_while_bm25_is_warming():
+    application = app_module.create_app(
+        agent_service=object(),
+        component_status={
+            "model": {"status": "available"},
+            "database": {"status": "available"},
+            "vector_store": {"status": "available"},
+            "mcp": {"status": "available"},
+            "bm25": {"status": "warming", "cached_pipelines": 0},
+        },
+    )
+
+    ready = TestClient(application).get("/health/ready")
+
+    assert ready.status_code == 200
+    assert ready.json()["status"] == "degraded"
+    assert ready.json()["components"]["bm25"]["status"] == "warming"
 
 
 def test_manager_reasoning_synthesizer_is_only_built_for_enabled_deepseek():
@@ -37,6 +112,23 @@ def test_manager_reasoning_synthesizer_is_only_built_for_enabled_deepseek():
     assert synthesizer is not None
     assert synthesizer.agent.model == "pro-model"
     assert model_factory.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_lifespan_waits_for_pending_quality_completion_tasks():
+    application = app_module.create_app(agent_service=object())
+    completed = asyncio.Event()
+
+    async def finish_quality_capture():
+        await asyncio.sleep(0.01)
+        completed.set()
+
+    async with application.router.lifespan_context(application):
+        task = asyncio.create_task(finish_quality_capture())
+        application.state.quality_completion_tasks.add(task)
+
+    assert completed.is_set()
+    assert not application.state.quality_completion_tasks
 
 
 @pytest.mark.parametrize(
@@ -124,6 +216,9 @@ def test_production_lifespan_wires_catalog_scopes_and_swagger_provider(
         def warm(self, scopes):
             captured["warm_scopes"] = scopes
 
+        def warm_status(self):
+            return {"status": "available", "cached_pipelines": 1}
+
     class FakeMCP:
         def __init__(self, settings):
             self.available = False
@@ -154,6 +249,15 @@ def test_production_lifespan_wires_catalog_scopes_and_swagger_provider(
         def __init__(self, path):
             captured["feishu_db"] = path
 
+        async def initialize(self):
+            return None
+
+    original_relational_factory = app_module.RelationalRepositoryFactory
+
+    class FakeRelationalFactory(original_relational_factory):
+        def feishu_events(self, path):
+            return FakeFeishuRepository(path)
+
     class FakeFeishuBridge:
         def __init__(self, **kwargs):
             captured["feishu_bridge"] = kwargs
@@ -165,15 +269,19 @@ def test_production_lifespan_wires_catalog_scopes_and_swagger_provider(
         async def close(self):
             captured["feishu_closed"] = True
 
+    def fake_agent_service(**kwargs):
+        captured["agent_service"] = kwargs
+        return object()
+
     monkeypatch.setattr(app_module, "Settings", lambda: settings)
     monkeypatch.setattr(app_module, "configure_logging", lambda settings: None)
     monkeypatch.setattr(app_module, "AgentModelFactory", FakeModelFactory)
     monkeypatch.setattr(app_module, "RetrievalPipelineRegistry", FakeRegistry)
     monkeypatch.setattr(app_module, "MetricMCPClient", FakeMCP)
     monkeypatch.setattr(app_module, "AgentFactory", FakeAgentFactory)
-    monkeypatch.setattr(app_module, "AgentService", lambda **kwargs: object())
+    monkeypatch.setattr(app_module, "AgentService", fake_agent_service)
     monkeypatch.setattr(app_module, "LarkOapiGateway", FakeFeishuGateway, raising=False)
-    monkeypatch.setattr(app_module, "FeishuEventRepository", FakeFeishuRepository, raising=False)
+    monkeypatch.setattr(app_module, "RelationalRepositoryFactory", FakeRelationalFactory)
     monkeypatch.setattr(app_module, "FeishuBotBridge", FakeFeishuBridge, raising=False)
 
     application = app_module.create_app()
@@ -195,10 +303,14 @@ def test_production_lifespan_wires_catalog_scopes_and_swagger_provider(
     assert captured["agent_factory"]["swagger_inspector"] is not None
     assert captured["agent_factory"]["swagger_source_provider"] is not None
     assert captured["agent_factory"]["bug_graph_service"] is not None
+    assert captured["agent_service"]["public_citation_limit"] == 5
+    assert captured["agent_service"]["citation_min_rerank_score"] == 0.35
+    assert captured["agent_service"]["citation_min_rrf_score"] == 0.02
     assert captured["mcp_closed"] is True
     assert captured["feishu_started"] is True
     assert captured["feishu_closed"] is True
     assert captured["feishu_db"] == tmp_path / "feishu.db"
+    assert captured["warm_scopes"] == [("middle-platform", None)]
 
 
 def test_production_lifespan_marks_incomplete_grafana_configuration_unavailable(
