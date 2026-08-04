@@ -302,29 +302,29 @@ git commit -m "feat: gate public citations by evidence strength"
 - Test: `tests/test_multi_route_retrieval.py`
 - Test: `tests/test_agent_quality_capture.py`
 
-- [ ] **Step 1: Add timing-independent concurrency tests**
+- [x] **Step 1: Add timing-independent concurrency tests**
 
 Use events instead of wall-clock sleeps to prove product-document and code searches start before either finishes, while their budget reservations remain atomic.
 
-- [ ] **Step 2: Add single-execution tests**
+- [x] **Step 2: Add single-execution tests**
 
 Instrument fake Query Rewrite, keyword, vector and Rerank services. Repeating one normalized query in the same run must leave every counter at one.
 
-- [ ] **Step 3: Run focused tests and verify RED or existing coverage**
+- [x] **Step 3: Run focused tests and verify RED or existing coverage**
 
 Run: `python -m pytest tests/test_agent_evidence_collection_budget.py tests/test_multi_route_retrieval.py tests/test_agent_quality_capture.py -q`
 
 Expected: any missing single-execution or span behavior fails; already-correct concurrency tests remain green and are not rewritten.
 
-- [ ] **Step 4: Implement only measured gaps**
+- [x] **Step 4: Implement only measured gaps**
 
 Reuse completed evidence within a run, stop fallback retrieval once strong evidence exists, and ensure quality completion remains asynchronous. Do not add caches that cross users or knowledge scopes.
 
-- [ ] **Step 5: Run focused tests and verify GREEN**
+- [x] **Step 5: Run focused tests and verify GREEN**
 
 Run the same focused command and require PASS.
 
-- [ ] **Step 6: Commit measured latency fixes if production code changed**
+- [x] **Step 6: Commit measured latency fixes if production code changed**
 
 ```bash
 git add knowledge tests

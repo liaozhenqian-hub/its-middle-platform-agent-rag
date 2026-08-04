@@ -88,6 +88,9 @@ def test_agent_factory_builds_manager_with_domain_and_bug_specialists_as_tools()
     }
     approval = topology.specialists["approval_flow_expert"]
     workflow = topology.specialists["workflow_expert"]
+    assert "布尔条件中的 AND、OR 和提前返回" in approval.instructions
+    assert "对比问题" in approval.instructions
+    assert "未指定代码环境" in approval.instructions
     assert {tool.name for tool in approval.tools} == {
         "collect_domain_evidence",
     }

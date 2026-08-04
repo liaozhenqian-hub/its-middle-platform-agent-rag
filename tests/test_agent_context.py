@@ -184,6 +184,44 @@ def test_public_citations_accept_exact_and_strict_rrf_fallback():
     assert [item.source_id for item in citations] == ["exact", "rrf"]
 
 
+def test_public_citations_keep_primary_contract_hits_ahead_of_supplemental_types():
+    context = AgentRunContext("conversation", "run")
+    for index in range(4):
+        context.add_knowledge_citation(
+            f"dto-{index}",
+            f"RequestType{index}",
+            "Approval flow",
+            {
+                "source_type": "code",
+                "symbol_name": f"RequestType{index}",
+                "_retrieval": {"exact": True, "supplemental": True},
+            },
+        )
+    for index, score in enumerate((0.9, 0.8, 0.7)):
+        context.add_knowledge_citation(
+            f"method-{index}",
+            f"Controller.method{index}",
+            "Approval flow",
+            {
+                "source_type": "code",
+                "symbol_name": f"Controller.method{index}",
+                "_retrieval": {
+                    "exact": False,
+                    "supplemental": False,
+                    "rerank_applied": True,
+                    "rerank_score": score,
+                },
+            },
+        )
+
+    citations = context.public_citations(
+        5, min_rerank_score=0.35, min_rrf_score=0.02
+    )
+
+    assert [item.source_id for item in citations[:2]] == ["method-0", "method-1"]
+    assert len(citations) == 5
+
+
 def test_context_hides_same_title_code_and_document_duplicates_from_public_output():
     context = AgentRunContext("conversation-1", "run-1")
     for branch, path in (("develop", "A.java"), ("master", "B.java")):

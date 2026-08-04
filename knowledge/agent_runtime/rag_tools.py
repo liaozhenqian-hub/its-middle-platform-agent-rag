@@ -15,6 +15,63 @@ class PipelineRegistry(Protocol):
     def get(self, app_id: str, domain: str | None): ...
 
 
+_CONTRACT_TYPE_PATTERN = re.compile(
+    r"\b[A-Z][A-Za-z0-9]*(?:VO|DTO|Req|Resp|Request|Response)\b"
+)
+
+
+def _referenced_contract_types(result: Any, query: str, limit: int = 4) -> list[str]:
+    """Prefer request/response types adjacent to the retrieved method symbol."""
+    referenced: list[str] = []
+
+    def extend(value: str, *, reverse: bool = False) -> None:
+        matches = _CONTRACT_TYPE_PATTERN.findall(value)
+        if reverse:
+            matches.reverse()
+        for identifier in matches:
+            if identifier not in referenced and identifier not in query:
+                referenced.append(identifier)
+            if len(referenced) >= limit:
+                return
+
+    hits = sorted(
+        result.final_results,
+        key=lambda hit: (
+            0
+            if "." in str(getattr(hit, "heading", "") or "")
+            or "." in str((getattr(hit, "metadata", None) or {}).get("symbol_name") or "")
+            else 1
+        ),
+    )
+    for hit in hits:
+        content = str(hit.content or "")
+        metadata = dict(getattr(hit, "metadata", None) or {})
+        anchors = [
+            str(getattr(hit, "heading", "") or "").rsplit(".", 1)[-1],
+            str(metadata.get("symbol_name") or "").rsplit(".", 1)[-1],
+        ]
+        anchor_index = next(
+            (
+                content.casefold().find(anchor.casefold())
+                for anchor in anchors
+                if anchor and content.casefold().find(anchor.casefold()) >= 0
+            ),
+            -1,
+        )
+        if anchor_index >= 0:
+            extend(content[anchor_index : anchor_index + 1200])
+            if len(referenced) < limit:
+                extend(content[max(0, anchor_index - 400) : anchor_index], reverse=True)
+        if len(referenced) < limit:
+            extend(content)
+        if len(referenced) >= limit:
+            break
+    return sorted(
+        referenced,
+        key=lambda identifier: identifier.startswith("Api"),
+    )[:limit]
+
+
 def _record_retrieval_spans(context: AgentRunContext, result: Any) -> None:
     for stage, duration_ms in (getattr(result, "stage_timings_ms", None) or {}).items():
         context.runtime_spans.append(
@@ -32,6 +89,7 @@ def _citation_metadata(
     result: Any | None,
     *,
     exact: bool = False,
+    supplemental: bool = False,
 ) -> dict[str, Any]:
     metadata = dict(getattr(item, "metadata", None) or {})
     exact_identifiers = set(getattr(result, "exact_identifiers", ()) or ())
@@ -57,6 +115,7 @@ def _citation_metadata(
             or identifier_match
             or "exact_symbol" in routes
         ),
+        **({"supplemental": True} if supplemental else {}),
         "rerank_applied": bool(getattr(result, "rerank_applied", False)),
         "rerank_score": getattr(item, "rerank_score", None),
         "fusion_score": getattr(item, "fusion_score", None),
@@ -331,25 +390,16 @@ def create_domain_evidence_tool(
             query,
             keyword_k,
             vector_k,
-            final_k,
+            max(final_k, 8)
+            if source_type == "code" and ctx.context.task_type == "api_contract"
+            else final_k,
             {"$and": clauses},
         )
         _record_retrieval_spans(ctx.context, result)
         search_results = [result]
         exact_type_chunks: list[Any] = []
         if source_type == "code" and ctx.context.task_type == "api_contract":
-            referenced_types: list[str] = []
-            for hit in result.final_results:
-                for identifier in re.findall(
-                    r"\b[A-Z][A-Za-z0-9]*(?:VO|DTO|Req|Resp|Request|Response)\b",
-                    str(hit.content or ""),
-                ):
-                    if identifier not in referenced_types and identifier not in query:
-                        referenced_types.append(identifier)
-                    if len(referenced_types) >= 2:
-                        break
-                if len(referenced_types) >= 2:
-                    break
+            referenced_types = _referenced_contract_types(result, query)
             if referenced_types:
                 exact_reservation = reserve(
                     ctx.context,
@@ -403,15 +453,28 @@ def create_domain_evidence_tool(
                         search_results.append(supplemental)
         items: list[dict[str, Any]] = []
         seen_chunks: set[str] = set()
+        seen_exact_content: set[tuple[str, str]] = set()
         for item in exact_type_chunks:
             if item.chunk_id in seen_chunks:
                 continue
+            logical_key = (
+                str(item.heading or "").strip().casefold(),
+                str(item.content or "").strip(),
+            )
+            if logical_key in seen_exact_content:
+                continue
+            seen_exact_content.add(logical_key)
             seen_chunks.add(item.chunk_id)
             ctx.context.add_knowledge_citation(
                 chunk_id=item.chunk_id,
                 heading=item.heading,
                 domain=domain_name,
-                metadata=_citation_metadata(item, None, exact=True),
+                metadata=_citation_metadata(
+                    item,
+                    None,
+                    exact=True,
+                    supplemental=True,
+                ),
             )
             items.append(
                 {

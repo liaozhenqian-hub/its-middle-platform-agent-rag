@@ -299,6 +299,24 @@ async def test_semantic_judge_receives_bounded_redacted_evidence_excerpts(tmp_pa
     assert "private-token" not in excerpt
 
 
+def test_default_evidence_excerpt_keeps_a_complete_short_method_chunk(tmp_path):
+    evaluator = QualityEvaluationService(
+        repository=QualityRepository(tmp_path / "quality.db"),
+        agent_service=FakeAgentService(),
+        application_version="0.2.0",
+        provider="deepseek",
+        model_name="deepseek-v4-flash",
+    )
+    method = "completionCondition" + (" x" * 2000) + " FINAL_BRANCH"
+
+    excerpt = evaluator._sanitize_excerpt(
+        method,
+        anchors=["completionCondition"],
+    )
+
+    assert "FINAL_BRANCH" in excerpt
+
+
 @pytest.mark.asyncio
 async def test_semantic_judge_timeout_is_persisted_without_blocking_the_run(tmp_path):
     import asyncio

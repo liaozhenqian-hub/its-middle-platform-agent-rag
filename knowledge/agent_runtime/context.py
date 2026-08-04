@@ -234,6 +234,22 @@ class AgentRunContext:
                     quality(citation)[4],
                 )
             )
+            supplemental = [
+                citation
+                for citation in candidates
+                if bool(
+                    (citation.metadata.get("_retrieval") or {}).get("supplemental")
+                )
+            ]
+            primary = [
+                citation
+                for citation in candidates
+                if not bool(
+                    (citation.metadata.get("_retrieval") or {}).get("supplemental")
+                )
+            ]
+            if supplemental and primary:
+                candidates = [*primary[:2], *supplemental, *primary[2:]]
 
         unique: list[Citation] = []
         seen: set[tuple[Any, ...]] = set()

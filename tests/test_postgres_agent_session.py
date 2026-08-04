@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from alembic import command
 from alembic.config import Config
-from agents import SQLiteSession
+from agents import SQLiteSession, SessionSettings
 import psycopg
 from psycopg import sql
 import pytest
@@ -86,6 +86,67 @@ async def test_postgres_agent_session_retries_invalidated_history_read_once():
 
     assert items == [{"role": "user", "content": "审批接口"}]
     assert engine.connect_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_postgres_agent_session_excludes_internal_tool_items_from_next_turn():
+    class Result:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return [
+                {"role": "user", "content": "第一轮问题"},
+                {
+                    "type": "function_call",
+                    "name": "collect_domain_evidence",
+                    "arguments": '{"query":"内部查询"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-1",
+                    "output": "很长的内部证据",
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "第一轮回答"}],
+                },
+                {"role": "user", "content": "第二轮问题"},
+            ]
+
+    class Connection:
+        async def execute(self, _statement):
+            return Result()
+
+    class ConnectionContext:
+        async def __aenter__(self):
+            return Connection()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+    class Engine:
+        def connect(self):
+            return ConnectionContext()
+
+    resources = type("Resources", (), {"engine": Engine()})()
+    session = PostgresAgentSession(
+        "conversation-follow-up",
+        resources,
+        session_settings=SessionSettings(limit=2),
+    )
+
+    items = await session.get_items()
+
+    assert items == [
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "第一轮回答"}],
+        },
+        {"role": "user", "content": "第二轮问题"},
+    ]
 
 
 def test_app_session_factory_uses_configured_relational_provider(tmp_path):

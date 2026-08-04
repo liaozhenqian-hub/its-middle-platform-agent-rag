@@ -395,7 +395,7 @@ class Settings(BaseSettings):
         alias="AGENT_QUALITY_JUDGE_TIMEOUT_SECONDS",
     )
     agent_quality_evidence_excerpt_max_chars: int = Field(
-        default=1200,
+        default=5000,
         ge=200,
         le=6000,
         alias="AGENT_QUALITY_EVIDENCE_EXCERPT_MAX_CHARS",

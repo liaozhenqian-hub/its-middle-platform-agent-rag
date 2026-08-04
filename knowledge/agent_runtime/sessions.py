@@ -31,18 +31,21 @@ class PostgresAgentSession(SessionABC):
             return None
         return self.session_settings.limit
 
+    @staticmethod
+    def _is_conversation_item(item: dict[str, Any]) -> bool:
+        """Keep public conversation turns out of prior tool execution state."""
+        role = str(item.get("role") or "")
+        item_type = str(item.get("type") or "")
+        return role == "user" or role == "assistant" or (
+            item_type == "message" and role in {"user", "assistant"}
+        )
+
     async def get_items(self, limit: int | None = None) -> list[dict[str, Any]]:
         resolved_limit = self._limit(limit)
         statement = select(agent_messages.c.message_data).where(
             agent_messages.c.session_id == self.session_id
         )
-        reverse = resolved_limit is not None
-        if reverse:
-            statement = statement.order_by(agent_messages.c.id.desc()).limit(
-                resolved_limit
-            )
-        else:
-            statement = statement.order_by(agent_messages.c.id.asc())
+        statement = statement.order_by(agent_messages.c.id.asc())
         for attempt in range(2):
             try:
                 async with self.database_resources.engine.connect() as connection:
@@ -51,8 +54,12 @@ class PostgresAgentSession(SessionABC):
             except DBAPIError as exc:
                 if attempt or not exc.connection_invalidated:
                     raise
-        items = [dict(item) for item in rows if isinstance(item, dict)]
-        return list(reversed(items)) if reverse else items
+        items = [
+            dict(item)
+            for item in rows
+            if isinstance(item, dict) and self._is_conversation_item(item)
+        ]
+        return items[-resolved_limit:] if resolved_limit is not None else items
 
     async def add_items(self, items: list[dict[str, Any]]) -> None:
         if not items:
